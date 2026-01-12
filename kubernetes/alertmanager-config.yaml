@@ -1,0 +1,43 @@
+# Example Alertmanager configuration snippet for EDA/AAP webhook
+# This should be added to your Alertmanager ConfigMap
+#
+# Add this receiver to your Alertmanager configuration:
+#
+# receivers:
+#   - name: 'eda-aap-webhook'
+#     webhook_configs:
+#       - url: 'http://your-eda-aap-endpoint/api/v2/job_templates/YOUR_TEMPLATE_ID/launch/'
+#         http_config:
+#           basic_auth:
+#             username: 'your-username'
+#             password: 'your-password'
+#         send_resolved: false
+#         http_method: POST
+#         title: '{{ .GroupLabels.alertname }}'
+#         text: |
+#           {{ range .Alerts }}
+#           Alert: {{ .Annotations.summary }}
+#           Node: {{ .Labels.node }}
+#           Description: {{ .Annotations.description }}
+#           {{ end }}
+#         # Custom headers for EDA/AAP
+#         headers:
+#           Content-Type: 'application/json'
+#         # Body will be JSON with node information
+#         body: |
+#           {
+#             "extra_vars": {
+#               "node_name": "{{ .CommonLabels.node }}",
+#               "alert_name": "{{ .GroupLabels.alertname }}",
+#               "severity": "{{ .CommonLabels.severity }}"
+#             }
+#           }
+#
+# Add this route to your Alertmanager configuration:
+#
+# route:
+#   routes:
+#     - match:
+#         receiver: eda-aap-webhook
+#       receiver: 'eda-aap-webhook'
+#       continue: true

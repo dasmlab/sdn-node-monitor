@@ -1,0 +1,300 @@
+# SDN Node Monitor
+
+A monitoring and remediation system for SDN nodes running FRR and BGP. This project consists of three main components:
+
+1. **Container (Golang)**: Monitors BGP daemon status and exposes Prometheus metrics
+2. **AlertRule CR**: Prometheus alerting rules that trigger remediation
+3. **Remediation Playbook**: Ansible playbook that restarts FRR and OVN BGP agent
+
+## Architecture
+
+```
+┌─────────────────┐
+│  SDN Node       │
+│  ┌───────────┐  │
+│  │ Monitor   │──┼──> HTTP /metrics endpoint
+│  │ Container │  │    (Prometheus scrapes)
+│  └───────────┘  │    (sdn_bgp_daemon_down only when down)
+│       │         │
+│       v         │
+│  podman exec    │
+│  frr vtysh      │
+│  show daemons   │
+└─────────────────┘
+       │
+       v
+┌─────────────────┐
+│  Prometheus     │
+│  Scrapes /metrics│
+│  + AlertRule    │──┼──> Alertmanager
+│  (checks metric │
+│   existence)    │
+└─────────────────┘
+       │
+       v
+┌─────────────────┐
+│  Alertmanager   │──┼──> EDA/AAP Webhook
+└─────────────────┘
+       │
+       v
+┌─────────────────┐
+│  EDA/AAP        │──┼──> Remediation Playbook
+└─────────────────┘
+       │
+       v
+┌─────────────────┐
+│  Ansible        │
+│  Playbook       │──┼──> Restart FRR + OVN BGP Agent
+└─────────────────┘
+```
+
+### Metric Pattern (Following frr_exporter)
+
+The monitor follows the **frr_exporter pattern** for efficient metric cardinality:
+
+- **When all required FRR daemons are UP**: Metric is **deleted** (not exposed) → No metric in Prometheus
+- **When any required FRR daemon is DOWN**: Metric is **exposed with value 1** → Prometheus sees the metric
+
+Required daemons checked: `zebra`, `bgpd`, `watchfrr`, `staticd`, `bfdd`
+
+This means:
+- **No metric = Healthy** (All required FRR daemons are running)
+- **Metric exists = Problem** (One or more required FRR daemons are missing)
+
+The AlertRule checks for metric **existence** (`sdn_bgp_daemon_down > 0`), not a specific value. This reduces cardinality significantly since we only create time series when there's an actual problem.
+
+## Components
+
+### 1. Monitor Container
+
+A lightweight Golang container that:
+- Runs as a background daemon
+- Periodically checks FRR container daemons via `podman exec frr vtysh -c "show daemons"`
+- Verifies all required daemons are present: `zebra`, `bgpd`, `watchfrr`, `staticd`, `bfdd`
+- Exposes Prometheus metrics at `/metrics`
+- Uses logrus for structured logging (debug, info, warn, critical)
+- Resilient error handling (no fatal/panics that cause container exit)
+
+**Configuration via environment variables:**
+- `NODE_NAME`: Node identifier (defaults to hostname)
+- `LOG_LEVEL`: Logging level - debug, info, warn, error (default: info)
+- `CHECK_INTERVAL`: How often to check BGP status (default: 30s)
+- `METRICS_PORT`: Port for metrics endpoint (default: 8080)
+
+**Prometheus Metrics:**
+- `sdn_bgp_daemon_down{node}`: Gauge (1 = down, metric only exists when BGP is down)
+  - **Cardinality Reduction**: This metric is only exposed when BGP is down
+  - When BGP is running, the metric is deleted and not exposed at all
+  - This follows the frr_exporter pattern for efficient metric cardinality
+
+### 2. Prometheus AlertRule
+
+Defines alerting rules that:
+- Monitor `sdn_bgp_daemon_status == 0` for 1 minute
+- Trigger alerts with node information
+- Route to EDA/AAP webhook receiver via Alertmanager
+
+### 3. Remediation Playbook
+
+Ansible playbook that:
+- Accepts EDA event with node name
+- Restarts FRR service
+- Restarts OVN BGP Agent service
+- Verifies BGP daemon is running via vtysh
+- Provides detailed logging and error handling
+
+## Project Structure
+
+```
+sdn-node-monitor/
+├── container/              # Container code and build scripts
+│   ├── main.go            # Main monitoring application
+│   ├── Dockerfile         # Container build definition
+│   ├── go.mod             # Go dependencies
+│   ├── buildme.sh         # Build script
+│   ├── pushme.sh          # Push to registry script
+│   └── runme-local.sh     # Run locally script
+├── kubernetes/            # Kubernetes manifests
+│   ├── deployment.yaml    # DaemonSet, Service, ServiceMonitor
+│   ├── alertrule.yaml     # PrometheusRule for alerts
+│   └── alertmanager-config.yaml  # Alertmanager config example
+├── ansible/               # Remediation playbooks
+│   ├── restart-frr-bgp-agent.yml  # Main remediation playbook
+│   └── eda-event-example.json    # Example EDA event
+├── Makefile               # Make targets for common tasks
+└── README.md              # This file
+```
+
+## Building
+
+### Build the Container
+
+```bash
+# Using the build script
+cd container
+./buildme.sh
+
+# Or using Make
+make docker-build
+
+# Or using Podman
+cd container
+podman build -t sdn-node-monitor:local .
+```
+
+### Build Go Binary Locally
+
+```bash
+# Using Make
+make build
+
+# Or manually
+cd container
+go mod download
+go build -o sdn-node-monitor main.go
+```
+
+## Deployment
+
+### Using Kubernetes/Podman
+
+1. **Deploy the DaemonSet:**
+   ```bash
+   kubectl apply -f kubernetes/deployment.yaml
+   ```
+
+2. **Deploy the AlertRule:**
+   ```bash
+   kubectl apply -f kubernetes/alertrule.yaml
+   ```
+
+3. **Configure Alertmanager:**
+   - Add the webhook receiver configuration (see `kubernetes/alertmanager-config.yaml`)
+   - Update your Alertmanager ConfigMap with the EDA/AAP webhook endpoint
+
+### Run Locally
+
+```bash
+# Using the run script
+cd container
+./runme-local.sh
+
+# Or using Make
+make docker-run
+
+# Or manually with Podman
+cd container
+podman run -d \
+  --name sdn-node-monitor-local-instance \
+  --hostname $(hostname) \
+  -e NODE_NAME=$(hostname) \
+  -e LOG_LEVEL=info \
+  -e CHECK_INTERVAL=30s \
+  -e METRICS_PORT=8080 \
+  -p 8080:8080 \
+  --network host \
+  -v /var/run/frr:/var/run/frr \
+  --restart always \
+  sdn-node-monitor:local
+```
+
+## Testing
+
+### Test the Monitor Locally
+
+```bash
+# Build and run locally (requires vtysh to be available)
+cd container
+export NODE_NAME=test-node
+export LOG_LEVEL=debug
+go run main.go
+
+# Or using Make
+make build
+make run
+```
+
+### Test Prometheus Metrics
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+### Test Health Endpoint
+
+```bash
+curl http://localhost:8080/health
+```
+
+### Test Remediation Playbook
+
+```bash
+# Using the example event
+ansible-playbook ansible/restart-frr-bgp-agent.yml \
+  -e @ansible/eda-event-example.json \
+  -i "localhost," -c local
+```
+
+## EDA/AAP Integration
+
+The Alertmanager should be configured to send webhooks to your EDA/AAP endpoint when the `SDNBGPDaemonDown` alert fires. The webhook payload should include:
+
+```json
+{
+  "extra_vars": {
+    "node_name": "sdn-node-01",
+    "alert_name": "SDNBGPDaemonDown",
+    "severity": "critical"
+  }
+}
+```
+
+The EDA/AAP job template should then call the remediation playbook with this event data.
+
+## Logging
+
+The container uses logrus with the following log levels:
+- **DEBUG**: Detailed diagnostic information
+- **INFO**: General informational messages
+- **WARN**: Warning messages (e.g., BGP not found)
+- **ERROR**: Critical issues requiring immediate attention (BGP down) - logged with "level: critical" field
+
+All logs include structured fields:
+- `node`: Node identifier
+- `error`: Error details when applicable
+- `output`: Command output when relevant
+
+## Troubleshooting
+
+### Container can't access FRR container
+
+- Ensure the container has access to podman binary and socket
+- With `hostNetwork: true`, container shares host network namespace
+- Verify podman socket is mounted: `/run/podman/podman.sock`
+- If podman binary is not in container, mount it from host (see deployment.yaml comments)
+- Ensure the FRR container is named `frr` (or update the command in code)
+- Container needs `SYS_ADMIN` capability to exec into other containers
+- Verify podman is available: `which podman` or mount from host
+
+### Metrics not appearing in Prometheus
+
+- Check ServiceMonitor is configured correctly
+- Verify Prometheus is scraping the correct namespace
+- Check pod labels match ServiceMonitor selector
+
+### Alerts not firing
+
+- Verify PrometheusRule is applied and recognized
+- Check Alertmanager is configured to receive alerts
+- Verify the metric `sdn_bgp_daemon_down` is being collected when BGP is down
+- Remember: the metric only exists when BGP is down, so you won't see it when healthy
+
+### Remediation playbook fails
+
+- Ensure SSH access to target node
+- Verify service names match your environment (frr, ovn-bgp-agent)
+- Check Ansible can execute systemd commands on target node
+
+## License
+
+[Add your license here]

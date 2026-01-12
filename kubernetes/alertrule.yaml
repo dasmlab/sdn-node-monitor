@@ -1,0 +1,35 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sdn-bgp-daemon-alert
+  namespace: monitoring  # Adjust namespace as needed
+  labels:
+    app: sdn-node-monitor
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: sdn.bgp.daemon
+      interval: 30s
+      rules:
+        # Alert when metric exists (metric only exists when FRR daemons are down)
+        # This is cardinality-efficient: no metric = healthy, metric exists = problem
+        # The metric label 'node' contains the node name and will be passed to EDA/AAP
+        - alert: SDNBGPDaemonDown
+          expr: sdn_bgp_daemon_down > 0
+          for: 1m  # Alert after FRR daemons are down for 1 minute
+          labels:
+            severity: critical
+            component: bgp
+            service: frr
+            # The 'node' label from the metric is automatically included in the alert
+            # This will be used by Alertmanager to pass node name to EDA/AAP
+            receiver: eda-aap-webhook
+          annotations:
+            summary: "FRR daemons are not running on SDN node - triggering remediation"
+            description: "One or more required FRR daemons (zebra, bgpd, watchfrr, staticd, bfdd) are missing on node {{ $labels.node }}. This requires immediate remediation. Triggering automated remediation via EDA/AAP."
+            runbook_url: "https://your-runbook-url/sdn-bgp-down"
+            # Custom annotation for EDA/AAP webhook - node name from metric label
+            eda_node: "{{ $labels.node }}"
+            eda_action: "remediate_bgp"
+            eda_playbook: "restart-frr-bgp-agent.yml"

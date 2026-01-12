@@ -1,0 +1,27 @@
+{
+  "eda_event": {
+    "labels": {
+      "alertname": "SDNBGPDaemonDown",
+      "node": "sdn-node-01",
+      "severity": "critical",
+      "component": "bgp",
+      "service": "frr"
+    },
+    "annotations": {
+      "summary": "FRR daemons are not running on SDN node - triggering remediation",
+      "description": "One or more required FRR daemons are missing on node sdn-node-01.",
+      "eda_node": "sdn-node-01",
+      "eda_action": "remediate_bgp",
+      "eda_playbook": "restart-frr-bgp-agent.yml"
+    },
+    "extra_vars": {
+      "node_name": "sdn-node-01",
+      "alert_name": "SDNBGPDaemonDown",
+      "severity": "critical"
+    },
+    "meta": {
+      "source": "alertmanager",
+      "timestamp": "2024-01-15T10:30:00Z"
+    }
+  }
+}

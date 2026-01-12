@@ -1,0 +1,204 @@
+---
+# Remediation playbook for restarting EPDM FRR and EPDM OVN BGP agent on SDN nodes
+# This playbook is triggered by EDA/AAP when receiving an alert from Alertmanager
+# 
+# Flow: Prometheus (scrapes metric) -> AlertRule -> Alertmanager -> EDA/AAP -> This playbook
+# The node name comes from the Prometheus metric label via Alertmanager annotations
+
+- name: Restart EPDM FRR and EPDM OVN BGP Agent on SDN Node
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # Extract node name from EDA event - can come from different places in the payload
+    node_name: "{{ eda_event.extra_vars.node_name | default(eda_event.labels.node | default(eda_event.annotations.eda_node | default(ansible_hostname))) }}"
+    alert_name: "{{ eda_event.extra_vars.alert_name | default(eda_event.labels.alertname | default('SDNBGPDaemonDown')) }}"
+    severity: "{{ eda_event.extra_vars.severity | default(eda_event.labels.severity | default('critical')) }}"
+    # Service names
+    frr_service: epdm_frr
+    ovn_bgp_service: edpm_ovn_bgp_agent
+  
+  tasks:
+    - name: Display alert information
+      debug:
+        msg:
+          - "=== Remediation Starting ==="
+          - "Received alert: {{ alert_name }}"
+          - "Node: {{ node_name }}"
+          - "Severity: {{ severity }}"
+          - "Services to restart: {{ frr_service }}, {{ ovn_bgp_service }}"
+          - "Starting clean restart sequence: stop -> verify stopped -> start"
+
+    - name: Verify node name is provided
+      fail:
+        msg: "Node name is required for remediation. Received: {{ node_name }}"
+      when: node_name is not defined or node_name == "" or node_name == ansible_hostname
+
+    - name: Set target host
+      set_fact:
+        target_host: "{{ node_name }}"
+
+    - name: Check if target node is reachable
+      wait_for:
+        host: "{{ target_host }}"
+        port: 22
+        timeout: 10
+        delay: 2
+      delegate_to: localhost
+      ignore_errors: yes
+      register: node_reachable
+
+    - name: Fail if node is not reachable
+      fail:
+        msg: "Target node {{ target_host }} is not reachable via SSH"
+      when: node_reachable.failed
+
+    - name: Check current status of EPDM FRR service
+      systemd:
+        name: "{{ frr_service }}"
+      delegate_to: "{{ target_host }}"
+      register: frr_status
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Check current status of EPDM OVN BGP Agent service
+      systemd:
+        name: "{{ ovn_bgp_service }}"
+      delegate_to: "{{ target_host }}"
+      register: ovn_bgp_status
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Display current service status
+      debug:
+        msg:
+          - "Current service status:"
+          - "  {{ frr_service }}: {{ frr_status.status.ActiveState | default('unknown') }}"
+          - "  {{ ovn_bgp_service }}: {{ ovn_bgp_status.status.ActiveState | default('unknown') }}"
+
+    # ===== EPDM FRR Service Restart =====
+    - name: Stop EPDM FRR service
+      systemd:
+        name: "{{ frr_service }}"
+        state: stopped
+      delegate_to: "{{ target_host }}"
+      register: frr_stop_result
+
+    - name: Verify EPDM FRR service is stopped
+      systemd:
+        name: "{{ frr_service }}"
+      delegate_to: "{{ target_host }}"
+      register: frr_stop_verify
+      retries: 5
+      delay: 2
+      until: frr_stop_verify.status.ActiveState == "inactive"
+      failed_when: frr_stop_verify.status.ActiveState != "inactive"
+
+    - name: Start EPDM FRR service
+      systemd:
+        name: "{{ frr_service }}"
+        state: started
+        enabled: yes
+      delegate_to: "{{ target_host }}"
+      register: frr_start_result
+
+    - name: Verify EPDM FRR service is running
+      systemd:
+        name: "{{ frr_service }}"
+      delegate_to: "{{ target_host }}"
+      register: frr_start_verify
+      retries: 10
+      delay: 2
+      until: frr_start_verify.status.ActiveState == "active"
+      failed_when: frr_start_verify.status.ActiveState != "active"
+
+    # ===== EPDM OVN BGP Agent Service Restart =====
+    - name: Stop EPDM OVN BGP Agent service
+      systemd:
+        name: "{{ ovn_bgp_service }}"
+        state: stopped
+      delegate_to: "{{ target_host }}"
+      register: ovn_bgp_stop_result
+
+    - name: Verify EPDM OVN BGP Agent service is stopped
+      systemd:
+        name: "{{ ovn_bgp_service }}"
+      delegate_to: "{{ target_host }}"
+      register: ovn_bgp_stop_verify
+      retries: 5
+      delay: 2
+      until: ovn_bgp_stop_verify.status.ActiveState == "inactive"
+      failed_when: ovn_bgp_stop_verify.status.ActiveState != "inactive"
+
+    - name: Start EPDM OVN BGP Agent service
+      systemd:
+        name: "{{ ovn_bgp_service }}"
+        state: started
+        enabled: yes
+      delegate_to: "{{ target_host }}"
+      register: ovn_bgp_start_result
+
+    - name: Verify EPDM OVN BGP Agent service is running
+      systemd:
+        name: "{{ ovn_bgp_service }}"
+      delegate_to: "{{ target_host }}"
+      register: ovn_bgp_start_verify
+      retries: 10
+      delay: 2
+      until: ovn_bgp_start_verify.status.ActiveState == "active"
+      failed_when: ovn_bgp_start_verify.status.ActiveState != "active"
+
+    - name: Wait for services to fully initialize
+      pause:
+        seconds: 5
+
+    # ===== Verification =====
+    - name: Final verification - Check EPDM FRR service is running
+      systemd:
+        name: "{{ frr_service }}"
+      delegate_to: "{{ target_host }}"
+      register: frr_final_verify
+      failed_when: frr_final_verify.status.ActiveState != "active"
+
+    - name: Final verification - Check EPDM OVN BGP Agent service is running
+      systemd:
+        name: "{{ ovn_bgp_service }}"
+      delegate_to: "{{ target_host }}"
+      register: ovn_bgp_final_verify
+      failed_when: ovn_bgp_final_verify.status.ActiveState != "active"
+
+    - name: Check FRR daemons via podman exec
+      shell: podman exec frr vtysh -c "show daemons"
+      delegate_to: "{{ target_host }}"
+      register: vtysh_output
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Verify all required FRR daemons are present
+      assert:
+        that:
+          - "'zebra' in vtysh_output.stdout | lower"
+          - "'bgpd' in vtysh_output.stdout | lower"
+          - "'watchfrr' in vtysh_output.stdout | lower"
+          - "'staticd' in vtysh_output.stdout | lower"
+          - "'bfdd' in vtysh_output.stdout | lower"
+        fail_msg: "One or more required FRR daemons are still missing after remediation"
+        success_msg: "All required FRR daemons are now running successfully"
+      when: vtysh_output.rc == 0
+
+    - name: Display remediation summary
+      debug:
+        msg:
+          - "=== Remediation Summary ==="
+          - "Node: {{ target_host }}"
+          - "{{ frr_service }}: {{ frr_final_verify.status.ActiveState }}"
+          - "{{ ovn_bgp_service }}: {{ ovn_bgp_final_verify.status.ActiveState }}"
+          - "FRR daemons check: {{ 'PASSED' if (vtysh_output.rc == 0) else 'FAILED - could not verify' }}"
+          - "Remediation completed at {{ ansible_date_time.iso8601 }}"
+
+    - name: Fail if remediation was unsuccessful
+      fail:
+        msg: "Remediation failed: Services may not have started correctly or FRR daemons are still missing"
+      when: >
+        frr_final_verify.status.ActiveState != "active" or
+        ovn_bgp_final_verify.status.ActiveState != "active" or
+        (vtysh_output.rc != 0)
