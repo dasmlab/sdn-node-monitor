@@ -87,7 +87,25 @@ A lightweight Golang container that:
   - When BGP is running, the metric is deleted and not exposed at all
   - This follows the frr_exporter pattern for efficient metric cardinality
 
-### 2. Prometheus AlertRule
+### 2. Prometheus ScrapeConfig
+
+The `kubernetes/scrapeconfig.yaml` file contains the Prometheus scrape configuration for the SDN node monitor.
+
+**Important Notes:**
+- The container runs on port **8080** internally
+- The container is mapped to host port **8989** (configured in `runme-local.sh`)
+- Scrape targets should use the **host IP and port 8989**
+
+**Configuration:**
+- Update the `targets` list in `scrapeconfig.yaml` with your SDN node IPs
+- Default target: `192.168.1.2:8989`
+- Add more nodes as needed
+
+**Deployment:**
+- If using standard Prometheus: Apply the ConfigMap version
+- If using Prometheus Operator: Use the ScrapeConfig CRD version (commented in the file)
+
+### 3. Prometheus AlertRule
 
 Defines alerting rules that:
 - Monitor `sdn_bgp_daemon_status == 0` for 1 minute
@@ -116,6 +134,7 @@ sdn-node-monitor/
 │   └── runme-local.sh     # Run locally script
 ├── kubernetes/            # Kubernetes manifests
 │   ├── deployment.yaml    # DaemonSet, Service, ServiceMonitor
+│   ├── scrapeconfig.yaml  # Prometheus scrape configuration
 │   ├── alertrule.yaml     # PrometheusRule for alerts
 │   └── alertmanager-config.yaml  # Alertmanager config example
 ├── ansible/               # Remediation playbooks
