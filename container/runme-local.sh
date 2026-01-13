@@ -30,38 +30,57 @@ if [ -n "$FORCE_SOCKET" ]; then
     fi
 fi
 
-# SIMPLEST APPROACH: Use user socket and run as that user
-# This avoids all permission issues - container runs as same user as socket owner
-USER_SOCKET="/run/user/${CURRENT_USER}/podman/podman.sock"
-USER_SOCKET_DIR="/run/user/${CURRENT_USER}/podman"
-
-# Ensure user socket exists
-if [ ! -S "$USER_SOCKET" ]; then
-    echo "  Starting podman service to create user socket..."
-    podman system service --time 0 >/dev/null 2>&1 &
-    sleep 2
-    for i in {1..5}; do
-        [ -S "$USER_SOCKET" ] && break
-        sleep 1
-    done
+# Check SELinux status (RHEL)
+SELINUX_ENABLED=false
+if command -v getenforce >/dev/null 2>&1; then
+    if [ "$(getenforce 2>/dev/null)" = "Enforcing" ]; then
+        SELINUX_ENABLED=true
+        echo "  ℹ️  SELinux is Enforcing - will use :Z flag and label=disable"
+    fi
 fi
 
-if [ -S "$USER_SOCKET" ]; then
-    PODMAN_SOCKET="$USER_SOCKET"
-    SOCKET_DIR="$USER_SOCKET_DIR"
-    RUN_AS_USER="${CURRENT_USER}:${CURRENT_GROUP}"
-    echo "  ✅ Using user socket: $PODMAN_SOCKET"
-    echo "  ✅ Running as user ${CURRENT_USER} (matches socket owner)"
-    echo "  ℹ️  This avoids all permission issues"
-else
-    echo "  ❌ Error: Could not create user socket at $USER_SOCKET"
-    exit 1
+# Check for system socket FIRST (especially when running as root)
+SYSTEM_SOCKET="/run/podman/podman.sock"
+if [ -z "${PODMAN_SOCKET:-}" ] && [ -S "$SYSTEM_SOCKET" ]; then
+    SOCKET_OWNER=$(stat -c "%U:%G" "$SYSTEM_SOCKET" 2>/dev/null || echo "unknown")
+    SOCKET_PERMS=$(stat -c "%a" "$SYSTEM_SOCKET" 2>/dev/null || echo "unknown")
+    echo "  ✅ Found system socket: $SYSTEM_SOCKET (owner: $SOCKET_OWNER, perms: $SOCKET_PERMS)"
+    
+    # Use system socket - run as root to access it
+    PODMAN_SOCKET="$SYSTEM_SOCKET"
+    SOCKET_DIR="/run/podman"
+    RUN_AS_USER="0:0"
+    echo "  ✅ Using system socket (running as root)"
 fi
 
-# PODMAN_SOCKET should be set by now (user socket)
+# Fall back to user socket if system socket not available
 if [ -z "${PODMAN_SOCKET:-}" ]; then
-    echo "  ❌ Error: Could not determine podman socket location"
-    exit 1
+    USER_SOCKET="/run/user/${CURRENT_USER}/podman/podman.sock"
+    USER_SOCKET_DIR="/run/user/${CURRENT_USER}/podman"
+    
+    # Ensure user socket exists
+    if [ ! -S "$USER_SOCKET" ]; then
+        echo "  Starting podman service to create user socket..."
+        podman system service --time 0 >/dev/null 2>&1 &
+        sleep 2
+        for i in {1..5}; do
+            [ -S "$USER_SOCKET" ] && break
+            sleep 1
+        done
+    fi
+    
+    if [ -S "$USER_SOCKET" ]; then
+        PODMAN_SOCKET="$USER_SOCKET"
+        SOCKET_DIR="$USER_SOCKET_DIR"
+        RUN_AS_USER="${CURRENT_USER}:${CURRENT_GROUP}"
+        echo "  ✅ Using user socket: $PODMAN_SOCKET"
+        echo "  ✅ Running as user ${CURRENT_USER} (matches socket owner)"
+    else
+        echo "  ❌ Error: Could not find or create podman socket"
+        echo "     Tried: $SYSTEM_SOCKET"
+        echo "     Tried: $USER_SOCKET"
+        exit 1
+    fi
 fi
 
 # Set user if forced
@@ -122,13 +141,26 @@ PODMAN_CMD="podman run -d \
 	--userns=keep-id"
 echo "  ℹ️  Running as user ${RUN_AS_USER} (matches socket owner)"
 
-# Mount ONLY the socket file and podman directory (not entire /run/user/X)
-# This avoids permission issues with other directories like /run/user/X/bus
-PODMAN_CMD="${PODMAN_CMD} \
+# Mount the socket and directory
+# On RHEL with SELinux, use :Z flag to relabel for container access
+if [[ "$PODMAN_SOCKET" == /run/podman/* ]]; then
+    # System socket - use :Z for SELinux on RHEL
+    if [ "$SELINUX_ENABLED" = "true" ]; then
+        PODMAN_CMD="${PODMAN_CMD} \
+	-v ${SOCKET_DIR}:${SOCKET_DIR}:rw,Z"
+        echo "  ℹ️  Mounting system socket directory: ${SOCKET_DIR} (with :Z for SELinux)"
+    else
+        PODMAN_CMD="${PODMAN_CMD} \
+	-v ${SOCKET_DIR}:${SOCKET_DIR}:rw"
+        echo "  ℹ️  Mounting system socket directory: ${SOCKET_DIR}"
+    fi
+else
+    # User socket - mount socket and directory
+    PODMAN_CMD="${PODMAN_CMD} \
 	-v ${PODMAN_SOCKET}:${PODMAN_SOCKET}:rw \
 	-v ${SOCKET_DIR}:${SOCKET_DIR}:rw"
-echo "  ℹ️  Mounting socket: ${PODMAN_SOCKET}"
-echo "  ℹ️  Mounting directory: ${SOCKET_DIR}"
+    echo "  ℹ️  Mounting user socket: ${PODMAN_SOCKET}"
+fi
 
 PODMAN_CMD="${PODMAN_CMD} \
 	-e NODE_NAME=\"${NODE_NAME}\" \
@@ -141,6 +173,12 @@ PODMAN_CMD="${PODMAN_CMD} \
 	--network host \
 	--restart always \
 	${app}:local"
+
+# Add SELinux bypass if SELinux is enforcing
+if [ "$SELINUX_ENABLED" = "true" ]; then
+    PODMAN_CMD="${PODMAN_CMD} --security-opt label=disable"
+    echo "  ℹ️  Adding --security-opt label=disable for SELinux (RHEL)"
+fi
 
 eval $PODMAN_CMD
 
