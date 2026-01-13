@@ -174,11 +174,16 @@ PODMAN_CMD="${PODMAN_CMD} \
 	--restart always \
 	${app}:local"
 
-# Add SELinux bypass if SELinux is enforcing
+# Add SELinux bypass and privileged mode for podman-in-podman
+# This is required for containers to exec into other containers on RHEL
 if [ "$SELINUX_ENABLED" = "true" ]; then
     PODMAN_CMD="${PODMAN_CMD} --security-opt label=disable"
     echo "  ℹ️  Adding --security-opt label=disable for SELinux (RHEL)"
 fi
+
+# Add --privileged for podman-in-podman (required to mount sysfs and exec into other containers)
+PODMAN_CMD="${PODMAN_CMD} --privileged"
+echo "  ℹ️  Adding --privileged for podman-in-podman support"
 
 eval $PODMAN_CMD
 
