@@ -20,16 +20,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o sdn-node-monitor 
 # Final stage
 FROM alpine:latest
 
-# Install runtime dependencies
-# Note: With hostNetwork: true, we can access host's podman, but we need the binary
-# Option 1: Install podman in container (if available in Alpine repos)
-# Option 2: Mount podman binary from host (see deployment.yaml)
-RUN apk --no-cache add ca-certificates tini
-
-# If podman is available in Alpine repos, uncomment:
-# RUN apk --no-cache add podman
-
-# Alternative: Copy podman from host if mounted (see deployment volumeMounts)
+# Install runtime dependencies including podman client
+# Note: We need podman client in the container to execute 'podman exec frr' commands
+# The podman socket will be mounted from the host at runtime
+RUN apk --no-cache add ca-certificates tini podman
 
 WORKDIR /app
 
