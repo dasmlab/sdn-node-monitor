@@ -27,6 +27,7 @@ FROM alpine:latest
 # Install runtime dependencies including podman client
 # Note: We need podman client in the container to execute 'podman exec frr' commands
 # The podman socket will be mounted from the host at runtime
+# Works on both Ubuntu and RHEL host systems
 RUN apk --no-cache add ca-certificates tini podman
 
 WORKDIR /app

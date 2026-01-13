@@ -88,7 +88,15 @@ if podman ps --format "{{.Names}}" 2>/dev/null | grep -q "sdn-node-monitor"; the
     echo "   Container ID: $CONTAINER"
     echo "   Running as user: $(podman exec $CONTAINER id 2>/dev/null || echo "cannot exec")"
     echo "   Socket mounted: $(podman exec $CONTAINER ls -la ${SYSTEM_SOCKET} 2>/dev/null || podman exec $CONTAINER ls -la ${USER_SOCKET} 2>/dev/null || echo "socket not found in container")"
+    echo "   /run/user/X exists: $(podman exec $CONTAINER ls -d /run/user/* 2>/dev/null | head -1 || echo "NO")"
     echo "   Can see podman: $(podman exec $CONTAINER podman ps 2>&1 | head -1 || echo "FAILED")"
+    echo "   CONTAINER_HOST env: $(podman exec $CONTAINER sh -c 'echo $CONTAINER_HOST' 2>/dev/null || echo "not set")"
 else
     echo "   Container not running"
 fi
+echo ""
+echo "13. OS Information:"
+cat /etc/os-release 2>/dev/null | grep -E "^(NAME|VERSION_ID)=" || echo "   Cannot determine OS"
+echo ""
+echo "14. SELinux status (RHEL):"
+getenforce 2>/dev/null || echo "   SELinux not available (likely Ubuntu)"

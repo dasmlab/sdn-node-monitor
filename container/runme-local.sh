@@ -147,12 +147,15 @@ fi
 
 # Mount the socket and its directory
 # For user sockets, we need to mount the entire /run/user/X directory structure
+# This works on both Ubuntu and RHEL
 if [[ "$PODMAN_SOCKET" == /run/user/* ]]; then
     # User socket - mount the entire /run/user/X directory
+    # This ensures the full path structure exists in container (works on RHEL and Ubuntu)
     USER_RUN_DIR="/run/user/$(id -u)"
     PODMAN_CMD="${PODMAN_CMD} \
 	-v ${USER_RUN_DIR}:${USER_RUN_DIR}:rw"
     echo "  ℹ️  Mounting user runtime directory: ${USER_RUN_DIR}"
+    echo "  ℹ️  This ensures socket path exists in container (RHEL/Ubuntu compatible)"
 else
     # System socket - mount socket and directory
     PODMAN_CMD="${PODMAN_CMD} \
