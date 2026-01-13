@@ -27,6 +27,9 @@ RUN apk --no-cache add ca-certificates tini podman
 
 WORKDIR /app
 
+# Create directory for podman config (needed when running as non-root)
+RUN mkdir -p /app/.config/containers && chmod 755 /app/.config /app/.config/containers
+
 # Copy binary from builder
 COPY --from=builder /build/sdn-node-monitor .
 

@@ -29,18 +29,24 @@ else
     exit 1
 fi
 
+# Get user/group IDs to run container as same user that owns podman socket
+USER_ID=$(id -u)
+GROUP_ID=$(id -g)
+
 podman run -d \
 	--name ${app}-local-instance \
 	--hostname $(hostname) \
+	--user ${USER_ID}:${GROUP_ID} \
+	--userns=keep-id \
 	-e NODE_NAME=$(hostname) \
 	-e LOG_LEVEL=info \
 	-e CHECK_INTERVAL=30s \
 	-e METRICS_PORT=8080 \
 	-e CONTAINER_HOST=unix://${PODMAN_SOCKET} \
+	-e XDG_CONFIG_HOME=/app/.config \
 	-p 8989:8080 \
 	--network host \
 	-v ${PODMAN_SOCKET}:${PODMAN_SOCKET}:rw \
 	-v ${SOCKET_DIR}:${SOCKET_DIR}:rw \
-	--privileged \
 	--restart always \
 	${app}:local

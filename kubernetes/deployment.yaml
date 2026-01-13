@@ -52,6 +52,8 @@ spec:
         #   readOnly: true
         securityContext:
           privileged: false
+          runAsUser: 0  # Run as root to access podman socket (adjust if using rootless podman)
+          runAsNonRoot: false  # Set to true if running as non-root user
           capabilities:
             add:
             - SYS_ADMIN  # May be needed for podman exec
