@@ -4,6 +4,9 @@
 #
 # Note: The container runs on port 8080 internally, but is mapped to host port 8989
 # The scrape target should use the host IP and port 8989
+#
+# For Prometheus Operator, use additionalScrapeConfigs in the Prometheus CR
+# This ConfigMap will be referenced by the Prometheus CR
 
 apiVersion: v1
 kind: ConfigMap
@@ -13,6 +16,11 @@ metadata:
   labels:
     app: prometheus
 data:
+  # This will be referenced by Prometheus CR additionalScrapeConfigs
+  # Add this to your Prometheus CR:
+  #   additionalScrapeConfigs:
+  #     - key: scrapeconfig.yaml
+  #       name: sdn-node-monitor-scrapeconfig
   scrapeconfig.yaml: |
     # SDN Node Monitor scrape configuration
     - job_name: 'sdn-node-monitor'
@@ -44,7 +52,6 @@ data:
           target_label: node
           replacement: '${1}'
         # Add hostname label - if hostname is set in static_configs labels, use it
-        # Otherwise, you can resolve IP to hostname or set it manually per target
         - source_labels: [__meta_static_label_hostname]
           target_label: hostname
           # If hostname not in static labels, you can set it per target in static_configs
@@ -54,36 +61,16 @@ data:
           #   replacement: '${1}'  # This would set hostname = IP (if you want that)
 
 ---
-# Alternative: If using Prometheus Operator, use ScrapeConfig CRD instead
-# Uncomment below and remove the ConfigMap above if using Prometheus Operator
+# Example Prometheus CR snippet showing how to reference this ConfigMap
+# Add this to your Prometheus CR (usually in the same namespace):
 #
 # apiVersion: monitoring.coreos.com/v1
-# kind: ScrapeConfig
+# kind: Prometheus
 # metadata:
-#   name: sdn-node-monitor
+#   name: kube-prometheus  # or whatever your Prometheus CR is named
 #   namespace: monitoring
 # spec:
-#   jobName: sdn-node-monitor
-#   scrapeInterval: 30s
-#   scrapeTimeout: 10s
-#   metricsPath: /metrics
-#   scheme: http
-#   staticConfigs:
-#     - targets:
-#         - '192.168.1.2:8989'
-#       labels:
-#         job: sdn-node-monitor
-#         component: sdn-monitoring
-#         # Add hostname label per target (update with actual hostnames)
-#         # hostname: 'est2-m1-sdn01.idm.est.ngq.extra'
-#   relabelConfigs:
-#     - sourceLabels: [__address__]
-#       regex: '([^:]+):\d+'
-#       targetLabel: instance
-#       replacement: '${1}'
-#     - sourceLabels: [__address__]
-#       regex: '([^:]+):\d+'
-#       targetLabel: node
-#       replacement: '${1}'
-#     - sourceLabels: [__meta_static_label_hostname]
-#       targetLabel: hostname
+#   additionalScrapeConfigs:
+#     - key: scrapeconfig.yaml
+#       name: sdn-node-monitor-scrapeconfig
+#   # ... rest of your Prometheus CR config
