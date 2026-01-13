@@ -30,6 +30,8 @@ data:
           labels:
             job: 'sdn-node-monitor'
             component: 'sdn-monitoring'
+            # Add hostname label per target (update with actual hostnames)
+            # hostname: 'est2-m1-sdn01.idm.est.ngq.extra'
       relabel_configs:
         # Add instance label from target
         - source_labels: [__address__]
@@ -41,6 +43,15 @@ data:
           regex: '([^:]+):\d+'
           target_label: node
           replacement: '${1}'
+        # Add hostname label - if hostname is set in static_configs labels, use it
+        # Otherwise, you can resolve IP to hostname or set it manually per target
+        - source_labels: [__meta_static_label_hostname]
+          target_label: hostname
+          # If hostname not in static labels, you can set it per target in static_configs
+          # Or use this to copy from another label:
+          # - source_labels: [instance]
+          #   target_label: hostname
+          #   replacement: '${1}'  # This would set hostname = IP (if you want that)
 
 ---
 # Alternative: If using Prometheus Operator, use ScrapeConfig CRD instead
