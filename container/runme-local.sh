@@ -145,6 +145,21 @@ else
     echo "  ℹ️  Running as root to access podman socket"
 fi
 
+# Mount the socket and its directory
+# For user sockets, we need to mount the entire /run/user/X directory structure
+if [[ "$PODMAN_SOCKET" == /run/user/* ]]; then
+    # User socket - mount the entire /run/user/X directory
+    USER_RUN_DIR="/run/user/$(id -u)"
+    PODMAN_CMD="${PODMAN_CMD} \
+	-v ${USER_RUN_DIR}:${USER_RUN_DIR}:rw"
+    echo "  ℹ️  Mounting user runtime directory: ${USER_RUN_DIR}"
+else
+    # System socket - mount socket and directory
+    PODMAN_CMD="${PODMAN_CMD} \
+	-v ${PODMAN_SOCKET}:${PODMAN_SOCKET}:rw \
+	-v ${SOCKET_DIR}:${SOCKET_DIR}:rw"
+fi
+
 PODMAN_CMD="${PODMAN_CMD} \
 	-e NODE_NAME=\"${NODE_NAME}\" \
 	-e LOG_LEVEL=\"${LOG_LEVEL:-info}\" \
@@ -154,8 +169,6 @@ PODMAN_CMD="${PODMAN_CMD} \
 	-e XDG_CONFIG_HOME=/app/.config \
 	-p ${METRICS_PORT}:8080 \
 	--network host \
-	-v ${PODMAN_SOCKET}:${PODMAN_SOCKET}:rw \
-	-v ${SOCKET_DIR}:${SOCKET_DIR}:rw \
 	--restart always \
 	${app}:local"
 
