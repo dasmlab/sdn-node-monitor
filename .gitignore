@@ -29,3 +29,7 @@ go.work
 # Build artifacts
 dist/
 build/
+
+# Container image tar files
+*.tar
+container/*.tar

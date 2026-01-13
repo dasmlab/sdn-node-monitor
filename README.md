@@ -135,11 +135,32 @@ cd container
 ./buildme.sh
 
 # Or using Make
-make docker-build
+make podman-build
 
-# Or using Podman
+# Or using Podman directly
 cd container
 podman build -t sdn-node-monitor:local .
+```
+
+### Save Container Image for Transfer
+
+To save the built container image to a tar file for transfer to a secured environment:
+
+```bash
+cd container
+./saveme.sh
+```
+
+This creates `sdn-node-monitor-local.tar` which you can then transfer via SCP:
+
+```bash
+scp sdn-node-monitor-local.tar user@remote-host:/path/to/destination/
+```
+
+On the remote system, load the image:
+
+```bash
+podman load -i sdn-node-monitor-local.tar
 ```
 
 ### Build Go Binary Locally

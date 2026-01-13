@@ -1,6 +1,9 @@
 # Example Alertmanager configuration snippet for EDA/AAP webhook
 # This should be added to your Alertmanager ConfigMap
 #
+# Flow: Prometheus metric -> AlertRule -> Alertmanager -> EDA/AAP -> Playbook
+# The node name comes from the Prometheus metric label ($labels.node)
+#
 # Add this receiver to your Alertmanager configuration:
 #
 # receivers:
@@ -13,17 +16,37 @@
 #             password: 'your-password'
 #         send_resolved: false
 #         http_method: POST
-#         title: '{{ .GroupLabels.alertname }}'
-#         text: |
-#           {{ range .Alerts }}
-#           Alert: {{ .Annotations.summary }}
-#           Node: {{ .Labels.node }}
-#           Description: {{ .Annotations.description }}
-#           {{ end }}
 #         # Custom headers for EDA/AAP
 #         headers:
 #           Content-Type: 'application/json'
-#         # Body will be JSON with node information
+#         # Body contains the full Alertmanager payload structure
+#         # The playbook extracts node_name from multiple possible locations
+#         body: |
+#           {
+#             "eda_event": {
+#               "labels": {
+#                 "alertname": "{{ .GroupLabels.alertname }}",
+#                 "node": "{{ .CommonLabels.node }}",
+#                 "severity": "{{ .CommonLabels.severity }}",
+#                 "component": "{{ .CommonLabels.component }}",
+#                 "service": "{{ .CommonLabels.service }}"
+#               },
+#               "annotations": {
+#                 "summary": "{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}",
+#                 "description": "{{ range .Alerts }}{{ .Annotations.description }}{{ end }}",
+#                 "eda_node": "{{ range .Alerts }}{{ .Annotations.eda_node }}{{ end }}",
+#                 "eda_action": "{{ range .Alerts }}{{ .Annotations.eda_action }}{{ end }}",
+#                 "eda_playbook": "{{ range .Alerts }}{{ .Annotations.eda_playbook }}{{ end }}"
+#               },
+#               "extra_vars": {
+#                 "node_name": "{{ .CommonLabels.node }}",
+#                 "alert_name": "{{ .GroupLabels.alertname }}",
+#                 "severity": "{{ .CommonLabels.severity }}"
+#               }
+#             }
+#           }
+#
+# Alternative simpler format (if EDA expects different structure):
 #         body: |
 #           {
 #             "extra_vars": {
@@ -41,3 +64,6 @@
 #         receiver: eda-aap-webhook
 #       receiver: 'eda-aap-webhook'
 #       continue: true
+#
+# Note: The node name is extracted from the Prometheus metric label 'node'
+# which is set by the monitoring container when exposing the metric.

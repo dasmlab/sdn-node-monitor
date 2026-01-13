@@ -2,8 +2,8 @@
 set -euo pipefail
 
 app=sdn-node-monitor
-docker rm -f ${app}-local-instance || true
-docker run -d \
+podman rm -f ${app}-local-instance || true
+podman run -d \
 	--name ${app}-local-instance \
 	--hostname $(hostname) \
 	-e NODE_NAME=$(hostname) \
