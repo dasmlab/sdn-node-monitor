@@ -32,6 +32,7 @@ var (
 	checkInterval time.Duration = 30 * time.Second
 	nodeName      string
 	logLevel      string = "info"
+	gitCommit     string = "unknown"
 )
 
 func init() {
@@ -172,11 +173,14 @@ func runMonitor(ctx context.Context) {
 }
 
 func main() {
-	logrus.Info("SDN Node Monitor starting up")
+	logrus.WithFields(logrus.Fields{
+		"git_commit": gitCommit,
+	}).Info("SDN Node Monitor starting up")
 	logrus.WithFields(logrus.Fields{
 		"node":           nodeName,
 		"check_interval": checkInterval,
 		"log_level":      logLevel,
+		"git_commit":     gitCommit,
 	}).Info("Configuration loaded")
 
 	// Create context for graceful shutdown

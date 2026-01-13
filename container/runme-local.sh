@@ -30,38 +30,21 @@ if [ -n "$FORCE_SOCKET" ]; then
     fi
 fi
 
-# Check for system socket (root podman) - skip if already set
-if [ -z "${PODMAN_SOCKET:-}" ]; then
+# Check for system socket (root podman) - ALWAYS prefer system socket if it exists
+# System socket can be accessed by root, which solves permission issues
 SYSTEM_SOCKET="/run/podman/podman.sock"
 if [ -S "$SYSTEM_SOCKET" ]; then
     SOCKET_OWNER=$(stat -c "%U:%G" "$SYSTEM_SOCKET" 2>/dev/null || echo "unknown")
     SOCKET_PERMS=$(stat -c "%a" "$SYSTEM_SOCKET" 2>/dev/null || echo "unknown")
-    echo "  Found system socket: $SYSTEM_SOCKET (owner: $SOCKET_OWNER, perms: $SOCKET_PERMS)"
+    echo "  ✅ Found system socket: $SYSTEM_SOCKET (owner: $SOCKET_OWNER, perms: $SOCKET_PERMS)"
     
-    # If system socket exists and we're root, use it
-    if [ "$CURRENT_USER" -eq 0 ]; then
-        PODMAN_SOCKET="$SYSTEM_SOCKET"
-        SOCKET_DIR="/run/podman"
-        RUN_AS_USER="0:0"
-        echo "  ✅ Using system socket (running as root)"
-    elif [ "$SOCKET_OWNER" = "root:root" ]; then
-        # System socket owned by root - need to run as root or use user socket
-        echo "  ⚠️  System socket is root-owned, checking if we can access user socket..."
-        # Will fall through to user socket check below
-    elif [ "$SOCKET_OWNER" = "${CURRENT_USERNAME}:${CURRENT_USERNAME}" ] || [ "$SOCKET_OWNER" = "${CURRENT_USERNAME}:podman" ]; then
-        # Check if we can actually read it (test with podman)
-        if podman --remote --url unix://${SYSTEM_SOCKET} ps >/dev/null 2>&1; then
-            PODMAN_SOCKET="$SYSTEM_SOCKET"
-            SOCKET_DIR="/run/podman"
-            RUN_AS_USER="${CURRENT_USER}:${CURRENT_GROUP}"
-            echo "  ✅ Using system socket (accessible to current user)"
-        else
-            echo "  ⚠️  System socket exists but not accessible, trying user socket..."
-        fi
-    else
-        echo "  ⚠️  System socket owned by different user ($SOCKET_OWNER), trying user socket..."
-    fi
-    fi
+    # System socket exists - ALWAYS use it and run as root
+    # Root can access system socket regardless of owner
+    PODMAN_SOCKET="$SYSTEM_SOCKET"
+    SOCKET_DIR="/run/podman"
+    RUN_AS_USER="0:0"
+    echo "  ✅ Using system socket (running as root for full podman access)"
+    echo "  ℹ️  This allows the container to see and manage all podman containers"
 fi
 
 # Check for user socket (rootless podman) - skip if already set
@@ -82,13 +65,17 @@ if [ -z "${PODMAN_SOCKET:-}" ]; then
     fi
     
     if [ -S "$USER_SOCKET" ]; then
+        # If we're going to use user socket, we MUST run as that user
+        # Root cannot access user sockets due to permission restrictions
         PODMAN_SOCKET="$USER_SOCKET"
         SOCKET_DIR="$USER_SOCKET_DIR"
         RUN_AS_USER="${CURRENT_USER}:${CURRENT_GROUP}"
-        echo "  ✅ Using user socket: $PODMAN_SOCKET"
+        echo "  ✅ Using user socket: $PODMAN_SOCKET (will run as user ${CURRENT_USER})"
     else
         echo "  ❌ Error: Could not find or create podman socket"
-        echo "     Tried: $SYSTEM_SOCKET"
+        if [ -n "${SYSTEM_SOCKET:-}" ]; then
+            echo "     Tried: $SYSTEM_SOCKET"
+        fi
         echo "     Tried: $USER_SOCKET"
         exit 1
     fi
@@ -144,15 +131,25 @@ echo "   Socket: ${PODMAN_SOCKET}"
 echo "   User: ${RUN_AS_USER}"
 echo "   Port: ${METRICS_PORT}"
 
-podman run -d \
+# Build podman run command - adjust user namespace based on whether we're root
+PODMAN_CMD="podman run -d \
 	--name ${app}-local-instance \
-	--hostname $(hostname) \
+	--hostname $(hostname)"
+
+# Only add --user and --userns if not running as root
+if [ "$RUN_AS_USER" != "0:0" ]; then
+    PODMAN_CMD="${PODMAN_CMD} \
 	--user ${RUN_AS_USER} \
-	--userns=keep-id \
-	-e NODE_NAME="${NODE_NAME}" \
-	-e LOG_LEVEL="${LOG_LEVEL:-info}" \
-	-e CHECK_INTERVAL="${CHECK_INTERVAL:-30s}" \
-	-e METRICS_PORT="${METRICS_PORT}" \
+	--userns=keep-id"
+else
+    echo "  ℹ️  Running as root to access podman socket"
+fi
+
+PODMAN_CMD="${PODMAN_CMD} \
+	-e NODE_NAME=\"${NODE_NAME}\" \
+	-e LOG_LEVEL=\"${LOG_LEVEL:-info}\" \
+	-e CHECK_INTERVAL=\"${CHECK_INTERVAL:-30s}\" \
+	-e METRICS_PORT=\"${METRICS_PORT}\" \
 	-e CONTAINER_HOST=unix://${PODMAN_SOCKET} \
 	-e XDG_CONFIG_HOME=/app/.config \
 	-p ${METRICS_PORT}:8080 \
@@ -160,7 +157,9 @@ podman run -d \
 	-v ${PODMAN_SOCKET}:${PODMAN_SOCKET}:rw \
 	-v ${SOCKET_DIR}:${SOCKET_DIR}:rw \
 	--restart always \
-	${app}:local
+	${app}:local"
+
+eval $PODMAN_CMD
 
 echo ""
 echo "✅ Container started!"

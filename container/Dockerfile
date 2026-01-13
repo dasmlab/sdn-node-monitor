@@ -15,7 +15,11 @@ RUN go mod download
 COPY main.go ./
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o sdn-node-monitor .
+# Pass git commit hash as build arg if available
+ARG GIT_COMMIT=unknown
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
+	-ldflags "-X main.gitCommit=${GIT_COMMIT}" \
+	-o sdn-node-monitor .
 
 # Final stage
 FROM alpine:latest
