@@ -137,9 +137,15 @@ echo "   Port: ${METRICS_PORT}"
 PODMAN_CMD="podman run -d \
 	--name ${app}-local-instance \
 	--hostname $(hostname) \
-	--user ${RUN_AS_USER} \
-	--userns=keep-id"
-echo "  ℹ️  Running as user ${RUN_AS_USER} (matches socket owner)"
+	--user ${RUN_AS_USER}"
+
+# Only use --userns=keep-id for non-root users (conflicts with --privileged)
+if [ "${RUN_AS_USER}" != "0:0" ]; then
+    PODMAN_CMD="${PODMAN_CMD} --userns=keep-id"
+    echo "  ℹ️  Running as user ${RUN_AS_USER} (with user namespace)"
+else
+    echo "  ℹ️  Running as root (privileged mode)"
+fi
 
 # Mount the socket and directory
 # On RHEL with SELinux, use :Z flag to relabel for container access
