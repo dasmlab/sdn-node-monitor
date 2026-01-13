@@ -74,6 +74,8 @@ data:
 #       labels:
 #         job: sdn-node-monitor
 #         component: sdn-monitoring
+#         # Add hostname label per target (update with actual hostnames)
+#         # hostname: 'est2-m1-sdn01.idm.est.ngq.extra'
 #   relabelConfigs:
 #     - sourceLabels: [__address__]
 #       regex: '([^:]+):\d+'
@@ -83,3 +85,5 @@ data:
 #       regex: '([^:]+):\d+'
 #       targetLabel: node
 #       replacement: '${1}'
+#     - sourceLabels: [__meta_static_label_hostname]
+#       targetLabel: hostname
