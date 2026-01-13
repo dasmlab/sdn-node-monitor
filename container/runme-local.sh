@@ -30,55 +30,38 @@ if [ -n "$FORCE_SOCKET" ]; then
     fi
 fi
 
-# Check for system socket (root podman) - ALWAYS prefer system socket if it exists
-# System socket can be accessed by root, which solves permission issues
-SYSTEM_SOCKET="/run/podman/podman.sock"
-if [ -S "$SYSTEM_SOCKET" ]; then
-    SOCKET_OWNER=$(stat -c "%U:%G" "$SYSTEM_SOCKET" 2>/dev/null || echo "unknown")
-    SOCKET_PERMS=$(stat -c "%a" "$SYSTEM_SOCKET" 2>/dev/null || echo "unknown")
-    echo "  ✅ Found system socket: $SYSTEM_SOCKET (owner: $SOCKET_OWNER, perms: $SOCKET_PERMS)"
-    
-    # System socket exists - ALWAYS use it and run as root
-    # Root can access system socket regardless of owner
-    PODMAN_SOCKET="$SYSTEM_SOCKET"
-    SOCKET_DIR="/run/podman"
-    RUN_AS_USER="0:0"
-    echo "  ✅ Using system socket (running as root for full podman access)"
-    echo "  ℹ️  This allows the container to see and manage all podman containers"
+# SIMPLEST APPROACH: Use user socket and run as that user
+# This avoids all permission issues - container runs as same user as socket owner
+USER_SOCKET="/run/user/${CURRENT_USER}/podman/podman.sock"
+USER_SOCKET_DIR="/run/user/${CURRENT_USER}/podman"
+
+# Ensure user socket exists
+if [ ! -S "$USER_SOCKET" ]; then
+    echo "  Starting podman service to create user socket..."
+    podman system service --time 0 >/dev/null 2>&1 &
+    sleep 2
+    for i in {1..5}; do
+        [ -S "$USER_SOCKET" ] && break
+        sleep 1
+    done
 fi
 
-# Check for user socket (rootless podman) - skip if already set
+if [ -S "$USER_SOCKET" ]; then
+    PODMAN_SOCKET="$USER_SOCKET"
+    SOCKET_DIR="$USER_SOCKET_DIR"
+    RUN_AS_USER="${CURRENT_USER}:${CURRENT_GROUP}"
+    echo "  ✅ Using user socket: $PODMAN_SOCKET"
+    echo "  ✅ Running as user ${CURRENT_USER} (matches socket owner)"
+    echo "  ℹ️  This avoids all permission issues"
+else
+    echo "  ❌ Error: Could not create user socket at $USER_SOCKET"
+    exit 1
+fi
+
+# PODMAN_SOCKET should be set by now (user socket)
 if [ -z "${PODMAN_SOCKET:-}" ]; then
-    USER_SOCKET="/run/user/${CURRENT_USER}/podman/podman.sock"
-    USER_SOCKET_DIR="/run/user/${CURRENT_USER}/podman"
-    
-    # Ensure user socket exists by starting podman service if needed
-    if [ ! -S "$USER_SOCKET" ]; then
-        echo "  Starting podman service to create user socket..."
-        podman system service --time 0 >/dev/null 2>&1 &
-        sleep 1
-        # Wait up to 3 seconds for socket to appear
-        for i in {1..3}; do
-            [ -S "$USER_SOCKET" ] && break
-            sleep 1
-        done
-    fi
-    
-    if [ -S "$USER_SOCKET" ]; then
-        # If we're going to use user socket, we MUST run as that user
-        # Root cannot access user sockets due to permission restrictions
-        PODMAN_SOCKET="$USER_SOCKET"
-        SOCKET_DIR="$USER_SOCKET_DIR"
-        RUN_AS_USER="${CURRENT_USER}:${CURRENT_GROUP}"
-        echo "  ✅ Using user socket: $PODMAN_SOCKET (will run as user ${CURRENT_USER})"
-    else
-        echo "  ❌ Error: Could not find or create podman socket"
-        if [ -n "${SYSTEM_SOCKET:-}" ]; then
-            echo "     Tried: $SYSTEM_SOCKET"
-        fi
-        echo "     Tried: $USER_SOCKET"
-        exit 1
-    fi
+    echo "  ❌ Error: Could not determine podman socket location"
+    exit 1
 fi
 
 # Set user if forced
@@ -131,37 +114,21 @@ echo "   Socket: ${PODMAN_SOCKET}"
 echo "   User: ${RUN_AS_USER}"
 echo "   Port: ${METRICS_PORT}"
 
-# Build podman run command - adjust user namespace based on whether we're root
+# Build podman run command - run as the user that owns the socket
 PODMAN_CMD="podman run -d \
 	--name ${app}-local-instance \
-	--hostname $(hostname)"
-
-# Only add --user and --userns if not running as root
-if [ "$RUN_AS_USER" != "0:0" ]; then
-    PODMAN_CMD="${PODMAN_CMD} \
+	--hostname $(hostname) \
 	--user ${RUN_AS_USER} \
 	--userns=keep-id"
-else
-    echo "  ℹ️  Running as root to access podman socket"
-fi
+echo "  ℹ️  Running as user ${RUN_AS_USER} (matches socket owner)"
 
-# Mount the socket and its directory
-# For user sockets, we need to mount the entire /run/user/X directory structure
-# This works on both Ubuntu and RHEL
-if [[ "$PODMAN_SOCKET" == /run/user/* ]]; then
-    # User socket - mount the entire /run/user/X directory
-    # This ensures the full path structure exists in container (works on RHEL and Ubuntu)
-    USER_RUN_DIR="/run/user/$(id -u)"
-    PODMAN_CMD="${PODMAN_CMD} \
-	-v ${USER_RUN_DIR}:${USER_RUN_DIR}:rw"
-    echo "  ℹ️  Mounting user runtime directory: ${USER_RUN_DIR}"
-    echo "  ℹ️  This ensures socket path exists in container (RHEL/Ubuntu compatible)"
-else
-    # System socket - mount socket and directory
-    PODMAN_CMD="${PODMAN_CMD} \
+# Mount ONLY the socket file and podman directory (not entire /run/user/X)
+# This avoids permission issues with other directories like /run/user/X/bus
+PODMAN_CMD="${PODMAN_CMD} \
 	-v ${PODMAN_SOCKET}:${PODMAN_SOCKET}:rw \
 	-v ${SOCKET_DIR}:${SOCKET_DIR}:rw"
-fi
+echo "  ℹ️  Mounting socket: ${PODMAN_SOCKET}"
+echo "  ℹ️  Mounting directory: ${SOCKET_DIR}"
 
 PODMAN_CMD="${PODMAN_CMD} \
 	-e NODE_NAME=\"${NODE_NAME}\" \
