@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,11 +30,38 @@ var (
 	)
 
 	// Configuration
-	checkInterval time.Duration = 30 * time.Second
-	nodeName      string
-	logLevel      string = "info"
-	gitCommit     string = "unknown"
+	checkInterval   time.Duration = 30 * time.Second
+	nodeName        string
+	logLevel        string = "info"
+	gitCommit       string = "unknown"
+	testMode        string = "off"
+	testFlipInterval int  = 4
+	bufferWindow    time.Duration = 30 * time.Second
+	maxBufferSize   int          = 10
+
+	// State buffer for capturing logs before condition fires
+	stateBuffer struct {
+		sync.RWMutex
+		snapshots []StateSnapshot
+	}
+
+	// Test mode state
+	testModeState struct {
+		sync.RWMutex
+		flipState bool
+		flipCount  int
+	}
 )
+
+// StateSnapshot captures system state at a point in time
+type StateSnapshot struct {
+	Timestamp      time.Time
+	FRRLogs        string
+	OVNBGPStatus   string
+	OVNBGPLogs     string
+	FRRDaemonCheck string
+	SystemState    string
+}
 
 func init() {
 	// Register Prometheus metrics
@@ -76,12 +104,195 @@ func init() {
 			logrus.WithError(err).Warnf("Invalid CHECK_INTERVAL '%s', using default 30s", envInterval)
 		}
 	}
+
+	// Get test mode from environment
+	if envTestMode := os.Getenv("TEST_MODE"); envTestMode != "" {
+		testMode = strings.ToLower(envTestMode)
+		if testMode != "off" && testMode != "on" && testMode != "flip" {
+			logrus.WithField("test_mode", testMode).Warn("Invalid TEST_MODE, must be 'off', 'on', or 'flip'. Defaulting to 'off'")
+			testMode = "off"
+		}
+	}
+
+	// Get test flip interval from environment
+	if envFlipInterval := os.Getenv("TEST_FLIP_INTERVAL"); envFlipInterval != "" {
+		if parsed, err := time.ParseDuration(envFlipInterval); err == nil {
+			// Convert duration to number of check intervals
+			testFlipInterval = int(parsed / checkInterval)
+			if testFlipInterval < 1 {
+				testFlipInterval = 1
+			}
+		}
+	}
+
+	// Get buffer window from environment
+	if envBufferWindow := os.Getenv("BUFFER_WINDOW"); envBufferWindow != "" {
+		if parsed, err := time.ParseDuration(envBufferWindow); err == nil {
+			bufferWindow = parsed
+		} else {
+			logrus.WithError(err).Warnf("Invalid BUFFER_WINDOW '%s', using default 30s", envBufferWindow)
+		}
+	}
+
+	// Initialize state buffer
+	stateBuffer.snapshots = make([]StateSnapshot, 0, maxBufferSize)
+}
+
+// captureStateSnapshot captures current system state
+func captureStateSnapshot(ctx context.Context) StateSnapshot {
+	snapshot := StateSnapshot{
+		Timestamp: time.Now(),
+	}
+
+	// Capture FRR container logs (last 100 lines, last 30 seconds)
+	cmd := exec.CommandContext(ctx, "podman", "logs", "frr", "--tail", "100", "--since", "30s")
+	if output, err := cmd.CombinedOutput(); err == nil {
+		snapshot.FRRLogs = string(output)
+	} else {
+		snapshot.FRRLogs = fmt.Sprintf("Error capturing FRR logs: %v", err)
+	}
+
+	// Capture OVN BGP agent service status
+	cmd = exec.CommandContext(ctx, "systemctl", "status", "edpm_ovn_bgp_agent", "--no-pager", "-l")
+	if output, err := cmd.CombinedOutput(); err == nil {
+		snapshot.OVNBGPStatus = string(output)
+	} else {
+		snapshot.OVNBGPStatus = fmt.Sprintf("Error capturing OVN BGP agent status: %v", err)
+	}
+
+	// Capture OVN BGP agent recent logs
+	cmd = exec.CommandContext(ctx, "journalctl", "-u", "edpm_ovn_bgp_agent", "--since", "30s", "--no-pager", "-n", "50")
+	if output, err := cmd.CombinedOutput(); err == nil {
+		snapshot.OVNBGPLogs = string(output)
+	} else {
+		snapshot.OVNBGPLogs = fmt.Sprintf("Error capturing OVN BGP agent logs: %v", err)
+	}
+
+	// System state (dmesg tail - last 30 seconds)
+	cmd = exec.CommandContext(ctx, "dmesg", "-T", "--since", "30s")
+	if output, err := cmd.CombinedOutput(); err == nil {
+		// Limit to last 50 lines to avoid too much data
+		lines := strings.Split(string(output), "\n")
+		if len(lines) > 50 {
+			lines = lines[len(lines)-50:]
+		}
+		snapshot.SystemState = strings.Join(lines, "\n")
+	} else {
+		snapshot.SystemState = fmt.Sprintf("Error capturing system logs: %v", err)
+	}
+
+	return snapshot
+}
+
+// addToBuffer adds a snapshot to the rolling buffer
+func addToBuffer(snapshot StateSnapshot) {
+	stateBuffer.Lock()
+	defer stateBuffer.Unlock()
+
+	// Add new snapshot
+	stateBuffer.snapshots = append(stateBuffer.snapshots, snapshot)
+
+	// Remove old snapshots outside buffer window
+	cutoffTime := time.Now().Add(-bufferWindow)
+	validSnapshots := make([]StateSnapshot, 0, maxBufferSize)
+	for _, snap := range stateBuffer.snapshots {
+		if snap.Timestamp.After(cutoffTime) {
+			validSnapshots = append(validSnapshots, snap)
+		}
+	}
+
+	// Limit buffer size
+	if len(validSnapshots) > maxBufferSize {
+		validSnapshots = validSnapshots[len(validSnapshots)-maxBufferSize:]
+	}
+
+	stateBuffer.snapshots = validSnapshots
+}
+
+// dumpBuffer dumps the buffer contents to logs and optionally to file
+func dumpBuffer() {
+	stateBuffer.RLock()
+	defer stateBuffer.RUnlock()
+
+	if len(stateBuffer.snapshots) == 0 {
+		logrus.Warn("State buffer is empty - no state captured before condition fired")
+		return
+	}
+
+	// Build buffer dump
+	var buffer strings.Builder
+	buffer.WriteString("\n=== State Buffer Dump (last 30s before condition fired) ===\n")
+	buffer.WriteString(fmt.Sprintf("Captured %d snapshots\n\n", len(stateBuffer.snapshots)))
+
+	for i, snap := range stateBuffer.snapshots {
+		buffer.WriteString(fmt.Sprintf("--- Snapshot %d [%s] ---\n", i+1, snap.Timestamp.Format(time.RFC3339)))
+		buffer.WriteString(fmt.Sprintf("FRR Daemon Check:\n%s\n", snap.FRRDaemonCheck))
+		buffer.WriteString(fmt.Sprintf("FRR Logs:\n%s\n", snap.FRRLogs))
+		buffer.WriteString(fmt.Sprintf("OVN BGP Agent Status:\n%s\n", snap.OVNBGPStatus))
+		buffer.WriteString(fmt.Sprintf("OVN BGP Agent Logs:\n%s\n", snap.OVNBGPLogs))
+		if snap.SystemState != "" {
+			buffer.WriteString(fmt.Sprintf("System Logs:\n%s\n", snap.SystemState))
+		}
+		buffer.WriteString("\n")
+	}
+	buffer.WriteString("=== End State Buffer ===\n")
+
+	// Log the buffer dump
+	logrus.WithFields(logrus.Fields{
+		"node":         nodeName,
+		"level":        "critical",
+		"buffer_dump": buffer.String(),
+	}).Error("FRR daemons condition fired - state buffer dump")
+
+	// Optionally write to file
+	timestamp := time.Now().Format("20060102-150405")
+	filename := fmt.Sprintf("/tmp/sdn-monitor-capture-%s.log", timestamp)
+	if err := os.WriteFile(filename, []byte(buffer.String()), 0644); err == nil {
+		logrus.WithField("file", filename).Info("State buffer written to file")
+	} else {
+		logrus.WithError(err).Warn("Failed to write state buffer to file")
+	}
+}
+
+// shouldForceTestCondition determines if test mode should force condition
+func shouldForceTestCondition() bool {
+	testModeState.RLock()
+	defer testModeState.RUnlock()
+
+	switch testMode {
+	case "on":
+		return true
+	case "flip":
+		// Toggle every testFlipInterval checks
+		testModeState.flipCount++
+		if testModeState.flipCount >= testFlipInterval {
+			testModeState.flipState = !testModeState.flipState
+			testModeState.flipCount = 0
+		}
+		return testModeState.flipState
+	default:
+		return false
+	}
 }
 
 func checkBGPDaemon(ctx context.Context) (bool, error) {
 	logrus.WithFields(logrus.Fields{
 		"node": nodeName,
 	}).Debug("Checking FRR daemons status")
+
+	// Check if test mode should force condition
+	forceCondition := shouldForceTestCondition()
+	if forceCondition {
+		logrus.WithFields(logrus.Fields{
+			"node":      nodeName,
+			"test_mode": testMode,
+		}).Warn("TEST MODE: Forcing condition ON (FRR daemons down)")
+		bgpDaemonDown.WithLabelValues(nodeName).Set(1)
+		return false, fmt.Errorf("test mode forcing condition")
+	}
+
+	// Capture state snapshot before check
+	snapshot := captureStateSnapshot(ctx)
 
 	// Required daemons that must be present
 	requiredDaemons := []string{"zebra", "bgpd", "watchfrr", "staticd", "bfdd"}
@@ -90,12 +301,34 @@ func checkBGPDaemon(ctx context.Context) (bool, error) {
 	// Using -c flag to run command non-interactively (no -it needed)
 	cmd := exec.CommandContext(ctx, "podman", "exec", "frr", "vtysh", "-c", "show daemons")
 	output, err := cmd.CombinedOutput()
+	
+	// Store FRR daemon check output in snapshot
+	snapshot.FRRDaemonCheck = string(output)
+	if err != nil {
+		snapshot.FRRDaemonCheck = fmt.Sprintf("ERROR: %v\nOUTPUT: %s", err, string(output))
+	}
+
+	// Track previous state to detect transition
+	wasDown := false
+	if _, err := bgpDaemonDown.GetMetricWithLabelValues(nodeName); err == nil {
+		wasDown = true
+	}
+
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"node":    nodeName,
 			"error":   err.Error(),
 			"output":  string(output),
 		}).Error("Failed to execute podman exec frr vtysh command")
+		
+		// Add snapshot to buffer
+		addToBuffer(snapshot)
+		
+		// If transitioning from OK to DOWN, dump buffer
+		if !wasDown {
+			dumpBuffer()
+		}
+		
 		// On error, assume daemons are down and expose metric
 		bgpDaemonDown.WithLabelValues(nodeName).Set(1)
 		return false, fmt.Errorf("podman exec frr vtysh command failed: %w", err)
@@ -121,6 +354,15 @@ func checkBGPDaemon(ctx context.Context) (bool, error) {
 		return true, nil
 	} else {
 		// One or more daemons are missing - EXPOSE the metric with value 1
+		
+		// Add snapshot to buffer
+		addToBuffer(snapshot)
+		
+		// If transitioning from OK to DOWN, dump buffer
+		if !wasDown {
+			dumpBuffer()
+		}
+		
 		bgpDaemonDown.WithLabelValues(nodeName).Set(1)
 		logrus.WithFields(logrus.Fields{
 			"node":            nodeName,
@@ -135,12 +377,19 @@ func runMonitor(ctx context.Context) {
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 
-	logrus.WithFields(logrus.Fields{
+	logFields := logrus.Fields{
 		"node":           nodeName,
 		"check_interval": checkInterval,
-	}).Info("Starting FRR daemons monitor")
+	}
+	if testMode != "off" {
+		logFields["test_mode"] = testMode
+		if testMode == "flip" {
+			logFields["test_flip_interval"] = testFlipInterval
+		}
+	}
+	logrus.WithFields(logFields).Info("Starting FRR daemons monitor")
 
-		// Initial check
+	// Initial check
 	_, err := checkBGPDaemon(ctx)
 	if err != nil {
 		logrus.WithError(err).Error("Initial FRR daemons check failed")
@@ -159,14 +408,22 @@ func runMonitor(ctx context.Context) {
 			}
 
 			if !bgpRunning {
-				logrus.WithFields(logrus.Fields{
-					"node": nodeName,
+				logFields := logrus.Fields{
+					"node":  nodeName,
 					"level": "critical",
-				}).Error("FRR daemons are not running properly - alert should be triggered")
+				}
+				if testMode != "off" {
+					logFields["test_mode"] = testMode
+				}
+				logrus.WithFields(logFields).Error("FRR daemons are not running properly - alert should be triggered")
 			} else {
-				logrus.WithFields(logrus.Fields{
+				logFields := logrus.Fields{
 					"node": nodeName,
-				}).Info("All required FRR daemons are running normally")
+				}
+				if testMode != "off" {
+					logFields["test_mode"] = testMode
+				}
+				logrus.WithFields(logFields).Info("All required FRR daemons are running normally")
 			}
 		}
 	}
@@ -176,12 +433,23 @@ func main() {
 	logrus.WithFields(logrus.Fields{
 		"git_commit": gitCommit,
 	}).Info("SDN Node Monitor starting up")
-	logrus.WithFields(logrus.Fields{
+	
+	configFields := logrus.Fields{
 		"node":           nodeName,
 		"check_interval": checkInterval,
 		"log_level":      logLevel,
 		"git_commit":     gitCommit,
-	}).Info("Configuration loaded")
+	}
+	if testMode != "off" {
+		configFields["test_mode"] = testMode
+		if testMode == "flip" {
+			configFields["test_flip_interval"] = testFlipInterval
+		}
+	}
+	if bufferWindow > 0 {
+		configFields["buffer_window"] = bufferWindow
+	}
+	logrus.WithFields(configFields).Info("Configuration loaded")
 
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
