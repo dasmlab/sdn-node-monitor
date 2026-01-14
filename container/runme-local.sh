@@ -104,24 +104,26 @@ else
     echo "     This may cause issues - ensure socket permissions allow access"
 fi
 
-# Detect available port (default 8080, try alternatives if needed)
+# Detect available port (default 8989 for host, container uses 8080 internally)
+# Port mapping: host:container = 8989:8080
 if [ -n "$FORCE_PORT" ]; then
-    METRICS_PORT="$FORCE_PORT"
-    echo "  ✅ Using forced port: ${METRICS_PORT}"
+    HOST_METRICS_PORT="$FORCE_PORT"
+    echo "  ✅ Using forced host port: ${HOST_METRICS_PORT}"
 else
-    METRICS_PORT="${METRICS_PORT:-8080}"
+    HOST_METRICS_PORT="${METRICS_PORT:-8989}"
     if command -v ss >/dev/null 2>&1; then
-        while ss -tuln | grep -q ":${METRICS_PORT} "; do
-            echo "  ⚠️  Port ${METRICS_PORT} is in use, trying next port..."
-            METRICS_PORT=$((METRICS_PORT + 1))
-            if [ "$METRICS_PORT" -gt 8099 ]; then
-                echo "  ❌ Error: Could not find available port (tried 8080-8099)"
+        while ss -tuln | grep -q ":${HOST_METRICS_PORT} "; do
+            echo "  ⚠️  Port ${HOST_METRICS_PORT} is in use, trying next port..."
+            HOST_METRICS_PORT=$((HOST_METRICS_PORT + 1))
+            if [ "$HOST_METRICS_PORT" -gt 8999 ]; then
+                echo "  ❌ Error: Could not find available port (tried 8989-8999)"
                 exit 1
             fi
         done
     fi
-    echo "  ✅ Using metrics port: ${METRICS_PORT}"
+    echo "  ✅ Using host metrics port: ${HOST_METRICS_PORT} (container port: 8080)"
 fi
+CONTAINER_METRICS_PORT="8080"
 
 # Get hostname for NODE_NAME
 NODE_NAME="${NODE_NAME:-$(hostname)}"
@@ -131,7 +133,7 @@ echo ""
 echo "🚀 Starting ${app} container..."
 echo "   Socket: ${PODMAN_SOCKET}"
 echo "   User: ${RUN_AS_USER}"
-echo "   Port: ${METRICS_PORT}"
+echo "   Port mapping: ${HOST_METRICS_PORT}:${CONTAINER_METRICS_PORT}"
 
 # Build podman run command - run as the user that owns the socket
 PODMAN_CMD="podman run -d \
@@ -187,10 +189,10 @@ PODMAN_CMD="${PODMAN_CMD} \
 	-e NODE_NAME=\"${NODE_NAME}\" \
 	-e LOG_LEVEL=\"${LOG_LEVEL:-info}\" \
 	-e CHECK_INTERVAL=\"${CHECK_INTERVAL:-30s}\" \
-	-e METRICS_PORT=\"${METRICS_PORT}\" \
+	-e METRICS_PORT=\"${CONTAINER_METRICS_PORT}\" \
 	-e CONTAINER_HOST=unix://${PODMAN_SOCKET} \
 	-e XDG_CONFIG_HOME=/app/.config \
-	-p ${METRICS_PORT}:8080 \
+	-p ${HOST_METRICS_PORT}:${CONTAINER_METRICS_PORT} \
 	--network host \
 	--restart always \
 	${app}:local"
@@ -200,4 +202,4 @@ eval $PODMAN_CMD
 echo ""
 echo "✅ Container started!"
 echo "   View logs: podman logs -f ${app}-local-instance"
-echo "   Metrics: http://localhost:${METRICS_PORT}/metrics"
+echo "   Metrics: http://localhost:${HOST_METRICS_PORT}/metrics"
