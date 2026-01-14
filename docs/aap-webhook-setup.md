@@ -1,11 +1,12 @@
-# AAP Webhook Endpoint Setup Guide
+# EDA Webhook Endpoint Setup Guide
 
-This guide walks through setting up an Event-Driven Ansible (EDA) webhook endpoint in Ansible Automation Platform (AAP) to receive alerts from Prometheus Alertmanager and trigger remediation playbooks.
+This guide walks through setting up an Event-Driven Ansible (EDA) webhook endpoint to receive alerts from Prometheus Alertmanager and trigger remediation playbooks.
 
 ## Prerequisites
 
-- Access to AAP UI with admin privileges
-- Service account user created in AAP (for webhook authentication)
+- Event-Driven Ansible (EDA) installed and running
+- Access to EDA UI/API
+- Service account user created in AAP (for playbook execution)
 - Remediation playbook (`restart-frr-bgp-agent.yml`) already in AAP
 - Vault access (for storing the service account token)
 - External Secrets Operator (ESO) configured in your cluster
@@ -13,16 +14,154 @@ This guide walks through setting up an Event-Driven Ansible (EDA) webhook endpoi
 ## Overview
 
 The setup flow:
-1. Create a Job Template in AAP for the remediation playbook
-2. Generate/retrieve API token for the service account
-3. Store token in Vault
-4. Configure ESO to sync token to Kubernetes
-5. Update AlertmanagerConfig with the webhook URL
-6. Test the webhook endpoint
+1. Create/configure EDA webhook endpoint
+2. Create EDA rulebook to process Alertmanager events
+3. Generate/retrieve API token for the service account
+4. Store token in Vault
+5. Configure ESO to sync token to Kubernetes
+6. Update AlertmanagerConfig with the EDA webhook URL
+7. Test the webhook endpoint
 
 ---
 
-## Step 1: Create Job Template in AAP
+## Step 1: Create EDA Webhook Endpoint
+
+### Option A: Using EDA UI
+
+1. **Log into EDA UI** (if available)
+
+2. **Navigate to Webhooks**:
+   - Go to **Webhooks** or **Event Sources**
+   - Click **Add** → **Add Webhook**
+
+3. **Configure Webhook**:
+   - **Name**: `sdn-bgp-daemon-alerts`
+   - **Type**: `Webhook` or `HTTP`
+   - **Port**: `5000` (default) or your configured port
+   - **Path**: `/webhook/sdn-bgp-daemon` (customize as needed)
+   - **Authentication**: 
+     - Enable **Token Authentication** (recommended)
+     - Or use **Basic Auth** (less secure)
+   - **Enable**: Check to activate
+   - Click **Save**
+
+4. **Get Webhook URL**:
+   - Full URL format: `http://<eda-hostname>:<port>/webhook/sdn-bgp-daemon`
+   - Example: `http://eda.example.com:5000/webhook/sdn-bgp-daemon`
+   - Note this URL for AlertmanagerConfig
+
+### Option B: Using EDA CLI/Configuration
+
+1. **Create Webhook Configuration File** (`eda-webhook-config.yml`):
+
+   ```yaml
+   # EDA Webhook Event Source Configuration
+   event_source:
+     name: sdn-bgp-daemon-webhook
+     source:
+       plugin: ansible.eda.webhook
+       host: 0.0.0.0
+       port: 5000
+       paths:
+         - /webhook/sdn-bgp-daemon
+     # Optional: Token authentication
+     # token: "your-webhook-token-here"
+   ```
+
+2. **Deploy Webhook**:
+   ```bash
+   # If using EDA CLI
+   ansible-eda webhook start --config eda-webhook-config.yml
+   
+   # Or if using EDA as a service
+   # Add configuration to EDA configuration directory
+   ```
+
+3. **Verify Webhook is Running**:
+   ```bash
+   curl http://eda.example.com:5000/webhook/sdn-bgp-daemon
+   # Should return 200 OK or similar
+   ```
+
+---
+
+## Step 2: Create EDA Rulebook
+
+The rulebook defines how EDA processes incoming events and triggers playbooks.
+
+1. **Create Rulebook File** (`sdn-bgp-remediation-rulebook.yml`):
+
+   ```yaml
+   ---
+   - name: SDN BGP Daemon Remediation Rulebook
+     hosts: localhost
+     sources:
+       - ansible.eda.webhook:
+           host: 0.0.0.0
+           port: 5000
+           paths:
+             - /webhook/sdn-bgp-daemon
+     
+     rules:
+       - name: Process SDN BGP Daemon Down Alert
+         condition:
+           event.alertname == "SDNBGPDaemonDown"
+           and event.labels.component == "bgp"
+         action:
+           run_playbook:
+             name: restart-frr-bgp-agent.yml
+             organization: Default
+             inventory: SDN Nodes Inventory
+             extra_vars:
+               node_name: "{{ event.labels.node }}"
+               alert_name: "{{ event.alertname }}"
+               severity: "{{ event.labels.severity }}"
+               eda_node: "{{ event.annotations.eda_node }}"
+               eda_action: "{{ event.annotations.eda_action }}"
+               eda_playbook: "{{ event.annotations.eda_playbook }}"
+   ```
+
+2. **Alternative Rulebook Format** (if using different EDA structure):
+
+   ```yaml
+   ---
+   - name: Listen for SDN BGP alerts
+     hosts: localhost
+     sources:
+       - ansible.eda.webhook:
+           host: 0.0.0.0
+           port: 5000
+     rules:
+       - name: SDN BGP Daemon Down
+         condition:
+           - event.alertname == "SDNBGPDaemonDown"
+         action:
+           run_job_template:
+             name: "SDN BGP Daemon Remediation"
+             organization: Default
+             inventory: "SDN Nodes Inventory"
+             extra_vars:
+               node_name: "{{ event.labels.node | default(event.annotations.eda_node) }}"
+   ```
+
+3. **Deploy Rulebook to EDA**:
+
+   ```bash
+   # If using EDA CLI
+   ansible-rulebook --rulebook sdn-bgp-remediation-rulebook.yml
+   
+   # Or if using EDA as a service
+   # Copy rulebook to EDA rulebooks directory
+   # EDA will automatically pick it up
+   ```
+
+4. **Verify Rulebook is Active**:
+   - Check EDA logs for rulebook loading
+   - Verify webhook endpoint is listening
+
+---
+
+## Step 3: Create Job Template in AAP (for Playbook Execution)
 
 1. **Log into AAP UI** as an admin user
 
@@ -33,26 +172,21 @@ The setup flow:
 3. **Configure Job Template**:
    - **Name**: `SDN BGP Daemon Remediation`
    - **Job Type**: `Run`
-   - **Inventory**: Select your SDN nodes inventory (or create one)
+   - **Inventory**: Select your SDN nodes inventory
    - **Project**: Select project containing `restart-frr-bgp-agent.yml`
    - **Playbook**: `restart-frr-bgp-agent.yml`
    - **Credentials**: Add any required credentials (SSH keys, etc.)
    - **Variables**: 
      - Enable **Prompt on launch** for `node_name` variable
-     - This allows the webhook to pass the node name dynamically
-   - **Options**: 
-     - Enable **Enable Webhook** (important!)
-     - Enable **Enable Concurrent Jobs** if you want multiple remediations to run simultaneously
    - Click **Save**
 
-4. **Get Job Template ID**:
-   - After saving, note the **Job Template ID** from the URL or template details
-   - Example: If URL is `https://aap.example.com/#/templates/job_template/123`, the ID is `123`
-   - You'll need this for the webhook URL
+4. **Grant Permissions**:
+   - Ensure the service account user has **Execute** permission on this Job Template
+   - Go to Job Template → **Access** → Add service account with **Execute** role
 
 ---
 
-## Step 2: Generate API Token for Service Account
+## Step 4: Generate API Token for Service Account
 
 1. **Log into AAP UI** as the service account user (or as admin)
 
@@ -67,7 +201,6 @@ The setup flow:
    - **Scope**: `Write` (needs to launch job templates)
    - Click **Generate**
    - **IMPORTANT**: Copy the token immediately - you won't be able to see it again!
-   - Token format: `abc123def456...` (long alphanumeric string)
 
 4. **Verify Token Permissions**:
    - Ensure the service account user has:
@@ -77,7 +210,7 @@ The setup flow:
 
 ---
 
-## Step 3: Store Token in Vault
+## Step 5: Store Token in Vault
 
 1. **Access Vault** (via CLI or UI)
 
@@ -95,13 +228,12 @@ The setup flow:
 4. **Note the Vault Path**:
    - Path: `secret/data/aap/eda-webhook`
    - Property: `token`
-   - You'll need this for the ExternalSecret configuration
 
 ---
 
-## Step 4: Configure External Secrets Operator (ESO)
+## Step 6: Configure External Secrets Operator (ESO)
 
-1. **Create ExternalSecret** (if not already created):
+1. **Create ExternalSecret**:
 
    ```yaml
    apiVersion: external-secrets.io/v1beta1
@@ -135,22 +267,18 @@ The setup flow:
    kubectl get externalsecret eda-aap-token -n monitoring
    ```
 
-4. **Check Secret Contents** (base64 decoded):
-   ```bash
-   kubectl get secret eda-aap-token -n monitoring -o jsonpath='{.data.token}' | base64 -d
-   ```
-
 ---
 
-## Step 5: Update AlertmanagerConfig
+## Step 7: Update AlertmanagerConfig
 
-1. **Get AAP Webhook URL**:
-   - Format: `https://<aap-hostname>/api/v2/job_templates/<JOB_TEMPLATE_ID>/launch/`
-   - Example: `https://aap.example.com/api/v2/job_templates/123/launch/`
+1. **Get EDA Webhook URL**:
+   - Format: `http://<eda-hostname>:<port>/webhook/sdn-bgp-daemon`
+   - Example: `http://eda.example.com:5000/webhook/sdn-bgp-daemon`
+   - Use `https://` if EDA uses SSL
 
 2. **Update `kubernetes/alertmanager-config.yaml`**:
-   - Replace `http://your-eda-aap-endpoint/api/v2/job_templates/YOUR_TEMPLATE_ID/launch/` with your actual URL
-   - Ensure the URL uses `https://` if AAP uses SSL
+   - Replace the URL with your EDA webhook endpoint
+   - The body format should match what EDA expects (Alertmanager format)
 
 3. **Verify Secret Reference**:
    - The AlertmanagerConfig should reference:
@@ -161,6 +289,8 @@ The setup flow:
          name: eda-aap-token
          key: token
      ```
+   - **Note**: If EDA webhook uses token authentication, you may need a different secret
+   - If EDA doesn't require auth, you can remove the authorization section
 
 4. **Apply AlertmanagerConfig**:
    ```bash
@@ -170,121 +300,180 @@ The setup flow:
 5. **Verify Alertmanager Picked Up Config**:
    ```bash
    kubectl get alertmanagerconfig sdn-node-monitor-alertmanager-config -n monitoring
-   # Check Alertmanager pods logs for any errors
    kubectl logs -n monitoring -l app.kubernetes.io/name=alertmanager
    ```
 
 ---
 
-## Step 6: Configure Job Template to Accept Webhook Payload
+## Step 8: Configure EDA to Use AAP Token
 
-1. **In AAP UI**, go back to your Job Template
+If your EDA rulebook needs to call AAP APIs, configure it to use the token:
 
-2. **Configure Extra Variables**:
-   - The playbook expects `node_name` in `extra_vars`
-   - The AlertmanagerConfig sends it as:
-     ```json
-     {
-       "extra_vars": {
-         "node_name": "{{ .CommonLabels.node }}",
-         ...
-       }
-     }
-     ```
-   - AAP will automatically extract `extra_vars` from the webhook payload
+1. **Option A: Environment Variable**:
+   ```bash
+   export ANSIBLE_EDA_AAP_TOKEN=$(kubectl get secret eda-aap-token -n monitoring -o jsonpath='{.data.token}' | base64 -d)
+   ```
 
-3. **Enable Webhook Authentication** (if not already enabled):
-   - In Job Template → **Options** → Ensure **Enable Webhook** is checked
-   - **Webhook Service**: `GitLab`, `GitHub`, or `Generic` (use Generic for Alertmanager)
+2. **Option B: EDA Configuration File**:
+   ```yaml
+   # eda-config.yml
+   aap:
+     host: https://aap.example.com
+     token: "{{ lookup('env', 'ANSIBLE_EDA_AAP_TOKEN') }}"
+   ```
 
-4. **Get Webhook URL** (for testing):
-   - Job Template → **Details** → **Webhooks** section
-   - Copy the webhook URL (different from API launch URL)
-   - Format: `https://aap.example.com/api/v2/job_templates/<ID>/callback/`
+3. **Option C: Vault Integration** (if EDA supports it):
+   - Configure EDA to read token from Vault directly
+   - Or use ESO to sync to a location EDA can access
 
 ---
 
-## Step 7: Test the Webhook
+## Step 9: Test the Webhook
 
 ### Option A: Test via Alertmanager (Recommended)
 
 1. **Trigger Test Alert**:
-   - Set `TEST_MODE=on` in your monitoring container to force condition
+   - Set `TEST_MODE=on` in your monitoring container
    - Or wait for a real FRR daemon failure
    - Check Prometheus alerts: `sdn_bgp_daemon_down > 0`
 
 2. **Verify Alert Fired**:
    ```bash
-   # Check Alertmanager UI or logs
    kubectl logs -n monitoring -l app.kubernetes.io/name=alertmanager | grep SDNBGPDaemonDown
    ```
 
-3. **Check AAP Job Execution**:
+3. **Check EDA Received Event**:
+   ```bash
+   # Check EDA logs
+   kubectl logs -n <eda-namespace> -l app=eda | grep webhook
+   # Or check EDA UI for incoming events
+   ```
+
+4. **Check AAP Job Execution**:
    - In AAP UI → **Jobs** → Look for recently launched jobs
-   - Verify the job was triggered
+   - Verify the job was triggered by EDA
    - Check job output for successful remediation
 
 ### Option B: Test via curl (Manual)
 
-1. **Get Token from Secret**:
+1. **Get Token from Secret** (if EDA requires auth):
    ```bash
    TOKEN=$(kubectl get secret eda-aap-token -n monitoring -o jsonpath='{.data.token}' | base64 -d)
    ```
 
-2. **Send Test Webhook**:
+2. **Send Test Webhook to EDA**:
    ```bash
    curl -X POST \
-     https://aap.example.com/api/v2/job_templates/123/launch/ \
-     -H "Authorization: Bearer $TOKEN" \
+     http://eda.example.com:5000/webhook/sdn-bgp-daemon \
      -H "Content-Type: application/json" \
+     -H "Authorization: Bearer $TOKEN" \
      -d '{
-       "extra_vars": {
-         "node_name": "test-node.example.com",
-         "alert_name": "SDNBGPDaemonDown",
-         "severity": "critical"
+       "alerts": [{
+         "labels": {
+           "alertname": "SDNBGPDaemonDown",
+           "node": "test-node.example.com",
+           "component": "bgp",
+           "severity": "critical"
+         },
+         "annotations": {
+           "summary": "FRR daemons are not running",
+           "description": "Test alert",
+           "eda_node": "test-node.example.com",
+           "eda_action": "remediate_bgp",
+           "eda_playbook": "restart-frr-bgp-agent.yml"
+         }
+       }],
+       "commonLabels": {
+         "node": "test-node.example.com",
+         "alertname": "SDNBGPDaemonDown"
+       },
+       "groupLabels": {
+         "alertname": "SDNBGPDaemonDown"
        }
      }'
    ```
 
-3. **Verify Job Launched**:
-   - Check AAP UI → **Jobs** for the new job
-   - Verify `node_name` was passed correctly
+3. **Verify EDA Processed Event**:
+   - Check EDA logs for event processing
+   - Verify rulebook matched the condition
+   - Check if playbook was triggered
 
 ---
 
-## Step 8: Verify End-to-End Flow
+## Step 10: Verify End-to-End Flow
 
 1. **Monitor Container** → Detects FRR daemon down
 2. **Prometheus** → Scrapes metric `sdn_bgp_daemon_down{node="..."}`
 3. **PrometheusRule** → Fires alert `SDNBGPDaemonDown`
 4. **Alertmanager** → Routes to `eda-aap-webhook` receiver
-5. **AlertmanagerConfig** → Sends webhook to AAP with Bearer token
-6. **AAP** → Launches Job Template with `node_name` from alert
-7. **Playbook** → Executes remediation on target node
+5. **AlertmanagerConfig** → Sends webhook to EDA endpoint
+6. **EDA** → Receives event, processes through rulebook
+7. **EDA Rulebook** → Matches condition, triggers AAP Job Template
+8. **AAP** → Launches playbook with `node_name` from event
+9. **Playbook** → Executes remediation on target node
 
 ---
 
 ## Troubleshooting
 
-### Webhook Not Receiving Alerts
+### EDA Not Receiving Webhooks
 
-1. **Check AlertmanagerConfig**:
+1. **Check EDA Webhook Status**:
    ```bash
-   kubectl get alertmanagerconfig -n monitoring
-   kubectl describe alertmanagerconfig sdn-node-monitor-alertmanager-config -n monitoring
+   # Check if EDA webhook is running
+   curl http://eda.example.com:5000/webhook/sdn-bgp-daemon
+   # Or check EDA service status
+   kubectl get pods -n <eda-namespace> -l app=eda
    ```
 
-2. **Check Alertmanager Logs**:
+2. **Check EDA Logs**:
    ```bash
-   kubectl logs -n monitoring -l app.kubernetes.io/name=alertmanager | grep -i webhook
-   kubectl logs -n monitoring -l app.kubernetes.io/name=alertmanager | grep -i error
+   kubectl logs -n <eda-namespace> -l app=eda | grep webhook
+   kubectl logs -n <eda-namespace> -l app=eda | grep error
    ```
 
-3. **Verify Route Matchers**:
-   - Ensure `alertname: SDNBGPDaemonDown` matches your PrometheusRule
-   - Check `component: bgp` label is present in alert
+3. **Verify Network Connectivity**:
+   - Ensure Alertmanager can reach EDA endpoint
+   - Check firewall/network policies
+   - Verify DNS resolution
 
-### Token Authentication Fails
+### EDA Rulebook Not Matching Events
+
+1. **Check Rulebook Condition**:
+   - Verify condition matches Alertmanager payload structure
+   - Check event field names (may be nested differently)
+
+2. **Enable Debug Logging**:
+   ```yaml
+   # In rulebook, add debug action
+   action:
+     debug:
+       msg: "Received event: {{ event }}"
+   ```
+
+3. **Check Event Structure**:
+   - Log incoming events to see actual structure
+   - Adjust rulebook condition to match
+
+### AAP Job Not Launching from EDA
+
+1. **Check EDA-AAP Connection**:
+   - Verify EDA can reach AAP API
+   - Check AAP token is valid
+   - Verify token has correct permissions
+
+2. **Check EDA Logs for Errors**:
+   ```bash
+   kubectl logs -n <eda-namespace> -l app=eda | grep -i aap
+   kubectl logs -n <eda-namespace> -l app=eda | grep -i error
+   ```
+
+3. **Verify Rulebook Action**:
+   - Check `run_playbook` or `run_job_template` syntax
+   - Verify organization, inventory names are correct
+   - Check extra_vars are being passed correctly
+
+### Token Authentication Issues
 
 1. **Verify Secret Exists**:
    ```bash
@@ -303,52 +492,24 @@ The setup flow:
    kubectl describe externalsecret eda-aap-token -n monitoring
    ```
 
-### Job Template Not Launching
-
-1. **Check AAP Job Template Permissions**:
-   - Service account user needs **Execute** permission
-   - Verify in AAP UI → Job Template → **Access** tab
-
-2. **Check Webhook Payload**:
-   - Review Alertmanager logs for the actual payload sent
-   - Verify `extra_vars.node_name` is present
-
-3. **Check AAP API Logs**:
-   - In AAP UI → **Settings** → **System Activity Stream**
-   - Look for webhook/API call failures
-
-### Playbook Not Receiving node_name
-
-1. **Verify AlertmanagerConfig Body Template**:
-   - Ensure `{{ .CommonLabels.node }}` is correct
-   - The `node` label comes from the Prometheus metric
-
-2. **Check Metric Labels**:
-   ```bash
-   curl http://<node-ip>:8989/metrics | grep sdn_bgp_daemon_down
-   # Should show: sdn_bgp_daemon_down{node="..."} 1
-   ```
-
-3. **Test with Manual Extra Vars**:
-   - In AAP UI, manually launch job with `node_name` extra var
-   - Verify playbook receives it correctly
-
 ---
 
 ## Security Considerations
 
-1. **Token Rotation**:
+1. **Webhook Authentication**:
+   - Enable token authentication on EDA webhook if possible
+   - Use HTTPS for webhook endpoints
+   - Consider IP whitelisting if supported
+
+2. **Token Management**:
    - Rotate API tokens periodically
    - Update in Vault, ESO will sync automatically
-
-2. **Least Privilege**:
-   - Service account should only have permissions needed for remediation
-   - Consider creating a custom role instead of admin
+   - Use least privilege for service account
 
 3. **Network Security**:
-   - Ensure Alertmanager can reach AAP endpoint
-   - Use HTTPS for webhook URLs
-   - Consider network policies if using them
+   - Ensure Alertmanager can reach EDA endpoint
+   - Use network policies if available
+   - Encrypt traffic between components
 
 4. **Secret Management**:
    - Never commit tokens to git
@@ -357,19 +518,39 @@ The setup flow:
 
 ---
 
+## EDA-Specific Configuration Notes
+
+1. **Event Format**:
+   - EDA expects events in a specific format
+   - Alertmanager sends webhook in its own format
+   - Rulebook may need to transform event structure
+
+2. **Rulebook Location**:
+   - EDA may have specific directories for rulebooks
+   - Check EDA documentation for deployment method
+   - May need to restart EDA after rulebook changes
+
+3. **AAP Integration**:
+   - EDA can call AAP via API or ansible-runner
+   - Verify which method your EDA installation uses
+   - Configure AAP connection in EDA config
+
+---
+
 ## Next Steps
 
-- [ ] Set up monitoring and alerting for the remediation jobs
-- [ ] Create runbooks for common failure scenarios
+- [ ] Set up monitoring for EDA event processing
+- [ ] Create additional rulebooks for other alert types
 - [ ] Implement alerting on remediation job failures
 - [ ] Set up token rotation schedule
-- [ ] Document playbook execution results and metrics
+- [ ] Document EDA event processing metrics
 
 ---
 
 ## References
 
-- [AAP API Documentation](https://docs.ansible.com/automation-controller/latest/html/userguide/webhooks.html)
+- [Event-Driven Ansible Documentation](https://ansible.readthedocs.io/projects/rulebook/)
+- [EDA Webhook Plugin](https://github.com/ansible/event-driven-ansible)
 - [Alertmanager Webhook Configuration](https://prometheus.io/docs/alerting/latest/configuration/#webhook_config)
 - [External Secrets Operator](https://external-secrets.io/)
 - [Vault Documentation](https://www.vaultproject.io/docs)
