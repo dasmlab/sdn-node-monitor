@@ -256,20 +256,20 @@ func dumpBuffer() {
 
 // shouldForceTestCondition determines if test mode should force condition
 func shouldForceTestCondition() bool {
-	testModeState.RLock()
-	defer testModeState.RUnlock()
-
 	switch testMode {
 	case "on":
 		return true
 	case "flip":
 		// Toggle every testFlipInterval checks
+		testModeState.Lock()
 		testModeState.flipCount++
 		if testModeState.flipCount >= testFlipInterval {
 			testModeState.flipState = !testModeState.flipState
 			testModeState.flipCount = 0
 		}
-		return testModeState.flipState
+		state := testModeState.flipState
+		testModeState.Unlock()
+		return state
 	default:
 		return false
 	}
