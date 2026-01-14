@@ -9,10 +9,12 @@
   hosts: localhost
   gather_facts: false
   vars:
-    # Extract node name from EDA event - can come from different places in the payload
-    node_name: "{{ eda_event.extra_vars.node_name | default(eda_event.labels.node | default(eda_event.annotations.eda_node | default(ansible_hostname))) }}"
-    alert_name: "{{ eda_event.extra_vars.alert_name | default(eda_event.labels.alertname | default('SDNBGPDaemonDown')) }}"
-    severity: "{{ eda_event.extra_vars.severity | default(eda_event.labels.severity | default('critical')) }}"
+    # Extract node name - handles both direct EDA calls and Job Template calls
+    # When called from Job Template: node_name comes from extra_vars directly
+    # When called directly from EDA: node_name comes from eda_event.extra_vars
+    node_name: "{{ node_name | default(eda_event.extra_vars.node_name | default(eda_event.labels.node | default(eda_event.annotations.eda_node | default(ansible_hostname)))) }}"
+    alert_name: "{{ alert_name | default(eda_event.extra_vars.alert_name | default(eda_event.labels.alertname | default('SDNBGPDaemonDown'))) }}"
+    severity: "{{ severity | default(eda_event.extra_vars.severity | default(eda_event.labels.severity | default('critical'))) }}"
     # Service names
     frr_service: epdm_frr
     ovn_bgp_service: edpm_ovn_bgp_agent
