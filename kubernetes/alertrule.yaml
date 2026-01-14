@@ -1,3 +1,7 @@
+# PrometheusRule for SDN BGP Daemon monitoring
+# For RHOBS (Red Hat OpenShift Observability Suite)
+# The label selector should match your Prometheus CR's ruleSelector
+
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -5,7 +9,8 @@ metadata:
   namespace: monitoring  # Adjust namespace as needed
   labels:
     app: sdn-node-monitor
-    prometheus: kube-prometheus
+    # RHOBS typically uses these labels - adjust to match your Prometheus CR's ruleSelector
+    prometheus: system-monitoring-prometheus  # Match your Prometheus CR name
     role: alert-rules
 spec:
   groups:
@@ -24,7 +29,6 @@ spec:
             service: frr
             # The 'node' label from the metric is automatically included in the alert
             # This will be used by Alertmanager to pass node name to EDA/AAP
-            receiver: eda-aap-webhook
           annotations:
             summary: "FRR daemons are not running on SDN node - triggering remediation"
             description: "One or more required FRR daemons (zebra, bgpd, watchfrr, staticd, bfdd) are missing on node {{ $labels.node }}. This requires immediate remediation. Triggering automated remediation via EDA/AAP."

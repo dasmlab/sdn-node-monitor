@@ -1,69 +1,104 @@
-# Example Alertmanager configuration snippet for EDA/AAP webhook
-# This should be added to your Alertmanager ConfigMap
+# AlertmanagerConfig CRD for RHOBS (Red Hat OpenShift Observability Suite)
+# This replaces the need to edit Alertmanager ConfigMap directly
+# The Alertmanager CR will select this config via alertmanagerConfigSelector
 #
 # Flow: Prometheus metric -> AlertRule -> Alertmanager -> EDA/AAP -> Playbook
 # The node name comes from the Prometheus metric label ($labels.node)
+
+apiVersion: monitoring.coreos.com/v1beta1
+kind: AlertmanagerConfig
+metadata:
+  name: sdn-node-monitor-alertmanager-config
+  namespace: monitoring  # Adjust namespace as needed
+  labels:
+    app: sdn-node-monitor
+    # This label must match your Alertmanager CR's alertmanagerConfigSelector
+    alertmanagerConfig: sdn-node-monitor
+spec:
+  route:
+    # Route alerts matching our SDN BGP daemon alert
+    receiver: 'eda-aap-webhook'
+    groupBy: ['alertname', 'node']
+    groupWait: 10s
+    groupInterval: 10s
+    repeatInterval: 12h
+    # Match alerts from our PrometheusRule
+    matchers:
+      - name: alertname
+        value: SDNBGPDaemonDown
+      - name: component
+        value: bgp
+    continue: false  # Don't continue to default route
+  receivers:
+    - name: 'eda-aap-webhook'
+      webhookConfigs:
+        - url: 'http://your-eda-aap-endpoint/api/v2/job_templates/YOUR_TEMPLATE_ID/launch/'
+          httpConfig:
+            basicAuth:
+              username:
+                name: eda-aap-credentials
+                key: username
+              password:
+                name: eda-aap-credentials
+                key: password
+          sendResolved: false
+          httpMethod: POST
+          # Custom headers for EDA/AAP
+          headers:
+            Content-Type: 'application/json'
+          # Body contains the full Alertmanager payload structure
+          # The playbook extracts node_name from multiple possible locations
+          body: |
+            {
+              "eda_event": {
+                "labels": {
+                  "alertname": "{{ .GroupLabels.alertname }}",
+                  "node": "{{ .CommonLabels.node }}",
+                  "severity": "{{ .CommonLabels.severity }}",
+                  "component": "{{ .CommonLabels.component }}",
+                  "service": "{{ .CommonLabels.service }}"
+                },
+                "annotations": {
+                  "summary": "{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}",
+                  "description": "{{ range .Alerts }}{{ .Annotations.description }}{{ end }}",
+                  "eda_node": "{{ range .Alerts }}{{ .Annotations.eda_node }}{{ end }}",
+                  "eda_action": "{{ range .Alerts }}{{ .Annotations.eda_action }}{{ end }}",
+                  "eda_playbook": "{{ range .Alerts }}{{ .Annotations.eda_playbook }}{{ end }}"
+                },
+                "extra_vars": {
+                  "node_name": "{{ .CommonLabels.node }}",
+                  "alert_name": "{{ .GroupLabels.alertname }}",
+                  "severity": "{{ .CommonLabels.severity }}"
+                }
+              }
+            }
+
+---
+# Secret for EDA/AAP credentials (create this separately)
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: eda-aap-credentials
+#   namespace: monitoring
+# type: Opaque
+# stringData:
+#   username: your-username
+#   password: your-password
+
+---
+# Example Alertmanager CR snippet showing how to select this config
+# Add this to your Alertmanager CR (usually in the same namespace):
 #
-# Add this receiver to your Alertmanager configuration:
-#
-# receivers:
-#   - name: 'eda-aap-webhook'
-#     webhook_configs:
-#       - url: 'http://your-eda-aap-endpoint/api/v2/job_templates/YOUR_TEMPLATE_ID/launch/'
-#         http_config:
-#           basic_auth:
-#             username: 'your-username'
-#             password: 'your-password'
-#         send_resolved: false
-#         http_method: POST
-#         # Custom headers for EDA/AAP
-#         headers:
-#           Content-Type: 'application/json'
-#         # Body contains the full Alertmanager payload structure
-#         # The playbook extracts node_name from multiple possible locations
-#         body: |
-#           {
-#             "eda_event": {
-#               "labels": {
-#                 "alertname": "{{ .GroupLabels.alertname }}",
-#                 "node": "{{ .CommonLabels.node }}",
-#                 "severity": "{{ .CommonLabels.severity }}",
-#                 "component": "{{ .CommonLabels.component }}",
-#                 "service": "{{ .CommonLabels.service }}"
-#               },
-#               "annotations": {
-#                 "summary": "{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}",
-#                 "description": "{{ range .Alerts }}{{ .Annotations.description }}{{ end }}",
-#                 "eda_node": "{{ range .Alerts }}{{ .Annotations.eda_node }}{{ end }}",
-#                 "eda_action": "{{ range .Alerts }}{{ .Annotations.eda_action }}{{ end }}",
-#                 "eda_playbook": "{{ range .Alerts }}{{ .Annotations.eda_playbook }}{{ end }}"
-#               },
-#               "extra_vars": {
-#                 "node_name": "{{ .CommonLabels.node }}",
-#                 "alert_name": "{{ .GroupLabels.alertname }}",
-#                 "severity": "{{ .CommonLabels.severity }}"
-#               }
-#             }
-#           }
-#
-# Alternative simpler format (if EDA expects different structure):
-#         body: |
-#           {
-#             "extra_vars": {
-#               "node_name": "{{ .CommonLabels.node }}",
-#               "alert_name": "{{ .GroupLabels.alertname }}",
-#               "severity": "{{ .CommonLabels.severity }}"
-#             }
-#           }
-#
-# Add this route to your Alertmanager configuration:
-#
-# route:
-#   routes:
-#     - match:
-#         receiver: eda-aap-webhook
-#       receiver: 'eda-aap-webhook'
-#       continue: true
+# apiVersion: monitoring.coreos.com/v1
+# kind: Alertmanager
+# metadata:
+#   name: system-monitoring-alertmanager  # or whatever your Alertmanager CR is named
+#   namespace: monitoring
+# spec:
+#   alertmanagerConfigSelector:
+#     matchLabels:
+#       alertmanagerConfig: sdn-node-monitor
+#   # ... rest of your Alertmanager CR config
 #
 # Note: The node name is extracted from the Prometheus metric label 'node'
 # which is set by the monitoring container when exposing the metric.
