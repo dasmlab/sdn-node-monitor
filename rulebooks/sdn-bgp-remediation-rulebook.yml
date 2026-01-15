@@ -12,19 +12,17 @@
 
   rules:
     - name: Process SDN BGP Daemon Down Alert
-      # Alertmanager sends labels under commonLabels and alerts[0].labels
-      # Use a single expression (no list) to avoid parser errors
-      condition: >
-        event.commonLabels.alertname == "SDNBGPDaemonDown"
-        and event.commonLabels.component == "bgp"
+      # EDA 2.5 requires a single expression (no list) for condition
+      # This handles both alertname variants seen in logs
+      condition: (event.alertname == "SDNBGPDaemonDown" or event.alertname == "SDNFRRBGPDaemonDown") and event.labels.component == "bgp"
       action:
         run_job_template:
           name: "SDN BGP Daemon Remediation"
           organization: "Default"
           inventory: "SDN Nodes Inventory"
           extra_vars:
-            node_name: "{{ event.commonLabels.node | default(event.alerts[0].labels.node | default(event.alerts[0].annotations.eda_node)) }}"
-            alert_name: "{{ event.commonLabels.alertname | default(event.alerts[0].labels.alertname) }}"
-            severity: "{{ event.commonLabels.severity | default(event.alerts[0].labels.severity) }}"
-            eda_action: "{{ event.alerts[0].annotations.eda_action | default('remediate_bgp') }}"
-            eda_playbook: "{{ event.alerts[0].annotations.eda_playbook | default('restart-frr-bgp-agent.yml') }}"
+            node_name: "{{ event.labels.node | default(event.commonLabels.node | default(event.alerts[0].labels.node | default(event.alerts[0].annotations.eda_node))) }}"
+            alert_name: "{{ event.alertname | default(event.commonLabels.alertname | default(event.alerts[0].labels.alertname)) }}"
+            severity: "{{ event.labels.severity | default(event.commonLabels.severity | default(event.alerts[0].labels.severity)) }}"
+            eda_action: "{{ event.annotations.eda_action | default(event.alerts[0].annotations.eda_action | default('remediate_bgp')) }}"
+            eda_playbook: "{{ event.annotations.eda_playbook | default(event.alerts[0].annotations.eda_playbook | default('restart-frr-bgp-agent.yml')) }}"
