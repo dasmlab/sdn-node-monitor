@@ -1,0 +1,27 @@
+---
+- name: SDN BGP Daemon Remediation Rulebook (AAP 2.5 safe)
+  hosts: localhost
+  sources:
+    - ansible.eda.webhook:
+        host: 0.0.0.0
+        port: 5000
+        paths:
+          - /webhook/sdn-bgp-daemon
+        # Optional token authentication (set via env var)
+        # token: "{{ lookup('env', 'EDA_WEBHOOK_TOKEN') }}"
+
+  rules:
+    - name: Process SDN BGP Daemon Down Alert
+      # AAP 2.5: condition must be a single string expression
+      condition: 'event.alertname == "SDNFRRBGPDaemonDown" and event.labels.component == "bgp"'
+      action:
+        run_job_template:
+          name: "SDN BGP Daemon Remediation"
+          organization: "Default"
+          inventory: "SDN Nodes Inventory"
+          extra_vars:
+            node_name: "{{ event.labels.node }}"
+            alert_name: "{{ event.alertname }}"
+            severity: "{{ event.labels.severity }}"
+            eda_action: "{{ event.annotations.eda_action | default('remediate_bgp') }}"
+            eda_playbook: "{{ event.annotations.eda_playbook | default('restart-frr-bgp-agent.yml') }}"
