@@ -101,24 +101,27 @@ The rulebook defines how EDA processes incoming events and triggers playbooks.
            port: 5000
            paths:
              - /webhook/sdn-bgp-daemon
+           # Optional token authentication (set via env var)
+           # token: "{{ lookup('env', 'EDA_WEBHOOK_TOKEN') }}"
      
      rules:
        - name: Process SDN BGP Daemon Down Alert
-         condition:
-           event.alertname == "SDNBGPDaemonDown"
-           and event.labels.component == "bgp"
+         # Alertmanager sends labels under commonLabels and alerts[0].labels
+         # Use a single expression (no list) to avoid parser errors
+         condition: >
+           event.commonLabels.alertname == "SDNBGPDaemonDown"
+           and event.commonLabels.component == "bgp"
          action:
-           run_playbook:
-             name: restart-frr-bgp-agent.yml
-             organization: Default
-             inventory: SDN Nodes Inventory
+           run_job_template:
+             name: "SDN BGP Daemon Remediation"
+             organization: "Default"
+             inventory: "SDN Nodes Inventory"
              extra_vars:
-               node_name: "{{ event.labels.node }}"
-               alert_name: "{{ event.alertname }}"
-               severity: "{{ event.labels.severity }}"
-               eda_node: "{{ event.annotations.eda_node }}"
-               eda_action: "{{ event.annotations.eda_action }}"
-               eda_playbook: "{{ event.annotations.eda_playbook }}"
+               node_name: "{{ event.commonLabels.node | default(event.alerts[0].labels.node | default(event.alerts[0].annotations.eda_node)) }}"
+               alert_name: "{{ event.commonLabels.alertname | default(event.alerts[0].labels.alertname) }}"
+               severity: "{{ event.commonLabels.severity | default(event.alerts[0].labels.severity) }}"
+               eda_action: "{{ event.alerts[0].annotations.eda_action | default('remediate_bgp') }}"
+               eda_playbook: "{{ event.alerts[0].annotations.eda_playbook | default('restart-frr-bgp-agent.yml') }}"
    ```
 
 2. **Alternative Rulebook Format** (if using different EDA structure):
@@ -133,15 +136,15 @@ The rulebook defines how EDA processes incoming events and triggers playbooks.
            port: 5000
      rules:
        - name: SDN BGP Daemon Down
-         condition:
-           - event.alertname == "SDNBGPDaemonDown"
+         condition: >
+           event.commonLabels.alertname == "SDNBGPDaemonDown"
          action:
            run_job_template:
              name: "SDN BGP Daemon Remediation"
-             organization: Default
+             organization: "Default"
              inventory: "SDN Nodes Inventory"
              extra_vars:
-               node_name: "{{ event.labels.node | default(event.annotations.eda_node) }}"
+               node_name: "{{ event.commonLabels.node | default(event.alerts[0].labels.node | default(event.alerts[0].annotations.eda_node)) }}"
    ```
 
 3. **Deploy Rulebook to EDA**:
