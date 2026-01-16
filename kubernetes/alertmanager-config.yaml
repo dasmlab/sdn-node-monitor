@@ -1,18 +1,19 @@
 # AlertmanagerConfig CRD for RHOBS (Red Hat OpenShift Observability Suite)
-# This replaces the need to edit Alertmanager ConfigMap directly
-# The Alertmanager CR will select this config via alertmanagerConfigSelector
+# Uses RHOBS AlertmanagerConfig API and selector labels
 #
 # Flow: Prometheus metric -> AlertRule -> Alertmanager -> EDA/AAP -> Playbook
 # The node name comes from the Prometheus metric label ($labels.node)
 
-apiVersion: monitoring.coreos.com/v1beta1
+apiVersion: monitoring.rhobs/v1
 kind: AlertmanagerConfig
 metadata:
   name: sdn-node-monitor-alertmanager-config
-  namespace: monitoring  # Adjust namespace as needed
+  namespace: openstack  # RHOBS Prometheus/Alertmanager in openstack namespace
   labels:
     app: sdn-node-monitor
-    # This label must match your Alertmanager CR's alertmanagerConfigSelector
+    # RHOBS selector label for AlertmanagerConfig
+    service: metricStorage
+    # Keep if your Alertmanager CR also uses alertmanagerConfigSelector
     alertmanagerConfig: sdn-node-monitor
 spec:
   route:
