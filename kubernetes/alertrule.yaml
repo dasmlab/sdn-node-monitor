@@ -1,17 +1,16 @@
 # PrometheusRule for SDN BGP Daemon monitoring
 # For RHOBS (Red Hat OpenShift Observability Suite)
-# The label selector should match your Prometheus CR's ruleSelector
+# Uses RHOBS PrometheusRule API and selector labels
 
-apiVersion: monitoring.coreos.com/v1
+apiVersion: monitoring.rhobs/v1
 kind: PrometheusRule
 metadata:
   name: sdn-bgp-daemon-alert
-  namespace: monitoring  # Adjust namespace as needed
+  namespace: openstack  # RHOBS Prometheus CR is in openstack namespace
   labels:
     app: sdn-node-monitor
-    # RHOBS typically uses these labels - adjust to match your Prometheus CR's ruleSelector
-    prometheus: system-monitoring-prometheus  # Match your Prometheus CR name
-    role: alert-rules
+    # RHOBS selector label for PrometheusRule
+    service: metricStorage
 spec:
   groups:
     - name: sdn.bgp.daemon
