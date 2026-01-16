@@ -208,9 +208,18 @@ go build -o sdn-node-monitor main.go
    kubectl apply -f kubernetes/alertrule.yaml
    ```
 
-3. **Configure Alertmanager:**
-   - Add the webhook receiver configuration (see `kubernetes/alertmanager-config.yaml`)
-   - Update your Alertmanager ConfigMap with the EDA/AAP webhook endpoint
+3. **Configure Alertmanager (RHOBS):**
+   - Apply `kubernetes/alertmanager-config.yaml`
+   - Update the EDA webhook URL in that file
+   - Expose the Rulebook Activation service with an edge route:
+     ```bash
+     oc create route edge sdn-mon-webhook -n aap-instance \
+       --service=sdn-mon-service \
+       --port=5000 \
+       --insecure-policy=Redirect
+     ```
+   - Use the route in `alertmanager-config.yaml`:
+     `https://sdn-mon-webhook-aap-instance.apps.<domain>/webhook/sdn-bgp-daemon`
 
 ### Run Locally
 

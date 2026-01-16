@@ -275,9 +275,16 @@ The rulebook defines how EDA processes incoming events and triggers playbooks.
 ## Step 7: Update AlertmanagerConfig
 
 1. **Get EDA Webhook URL**:
-   - Format: `http://<eda-hostname>:<port>/webhook/sdn-bgp-daemon`
-   - Example: `http://eda.example.com:5000/webhook/sdn-bgp-daemon`
-   - Use `https://` if EDA uses SSL
+   - In AAP 2.5, the Rulebook Activation creates a Service, but **no Route**
+   - You must expose the Service yourself:
+     ```bash
+     oc create route edge sdn-mon-webhook -n aap-instance \
+       --service=sdn-mon-service \
+       --port=5000 \
+       --insecure-policy=Redirect
+     ```
+   - Then use the Route URL:
+     `https://sdn-mon-webhook-aap-instance.apps.<domain>/webhook/sdn-bgp-daemon`
 
 2. **Update `kubernetes/alertmanager-config.yaml`**:
    - Replace the URL with your EDA webhook endpoint

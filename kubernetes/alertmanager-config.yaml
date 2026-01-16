@@ -32,15 +32,17 @@ spec:
   receivers:
     - name: 'eda-aap-webhook'
       webhookConfigs:
-        - url: 'http://your-eda-aap-endpoint/api/v2/job_templates/YOUR_TEMPLATE_ID/launch/'
-          httpConfig:
-            basicAuth:
-              username:
-                name: eda-aap-credentials
-                key: username
-              password:
-                name: eda-aap-credentials
-                key: password
+        # EDA webhook endpoint (Route to Rulebook Activation service)
+        # Example (TLS edge route):
+        # https://sdn-mon-webhook-aap-instance.apps.<domain>/webhook/sdn-bgp-daemon
+        - url: 'https://sdn-mon-webhook-aap-instance.apps.<domain>/webhook/sdn-bgp-daemon'
+          # Optional token auth (enable later if desired)
+          # httpConfig:
+          #   authorization:
+          #     type: Bearer
+          #     credentials:
+          #       name: eda-webhook-token
+          #       key: token
           sendResolved: false
           httpMethod: POST
           # Custom headers for EDA/AAP
@@ -74,16 +76,15 @@ spec:
             }
 
 ---
-# Secret for EDA/AAP credentials (create this separately)
+# Optional Secret for webhook token (create later if needed)
 # apiVersion: v1
 # kind: Secret
 # metadata:
-#   name: eda-aap-credentials
+#   name: eda-webhook-token
 #   namespace: monitoring
 # type: Opaque
 # stringData:
-#   username: your-username
-#   password: your-password
+#   token: your-webhook-token
 
 ---
 # Example Alertmanager CR snippet showing how to select this config

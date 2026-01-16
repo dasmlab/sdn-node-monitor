@@ -14,7 +14,7 @@
     - name: Process SDN BGP Daemon Down Alert
       # AAP 2.5: event is wrapped under event.payload
       # Single string expression required
-      condition: 'event.payload.alertname == "SDNFRRBGPDaemonDown" and event.payload.labels.component == "bgp"'
+      condition: '(event.payload.alertname == "SDNBGPDaemonDown" or event.payload.alertname == "SDNFRRBGPDaemonDown") and event.payload.labels.component == "bgp"'
       action:
         run_job_template:
           name: "SDN BGP Daemon Remediation"
