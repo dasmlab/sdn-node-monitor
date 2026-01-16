@@ -12,16 +12,17 @@
 
   rules:
     - name: Process SDN BGP Daemon Down Alert
-      # AAP 2.5: condition must be a single string expression
-      condition: 'event.alertname == "SDNFRRBGPDaemonDown" and event.labels.component == "bgp"'
+      # AAP 2.5: event is wrapped under event.payload
+      # Single string expression required
+      condition: 'event.payload.alertname == "SDNFRRBGPDaemonDown" and event.payload.labels.component == "bgp"'
       action:
         run_job_template:
           name: "SDN BGP Daemon Remediation"
           organization: "Default"
           inventory: "SDN Nodes Inventory"
           extra_vars:
-            node_name: "{{ event.labels.node }}"
-            alert_name: "{{ event.alertname }}"
-            severity: "{{ event.labels.severity }}"
-            eda_action: "{{ event.annotations.eda_action | default('remediate_bgp') }}"
-            eda_playbook: "{{ event.annotations.eda_playbook | default('restart-frr-bgp-agent.yml') }}"
+            node_name: "{{ event.payload.labels.node }}"
+            alert_name: "{{ event.payload.alertname }}"
+            severity: "{{ event.payload.labels.severity }}"
+            eda_action: "{{ event.payload.annotations.eda_action | default('remediate_bgp') }}"
+            eda_playbook: "{{ event.payload.annotations.eda_playbook | default('restart-frr-bgp-agent.yml') }}"
