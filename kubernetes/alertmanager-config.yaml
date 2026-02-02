@@ -4,7 +4,7 @@
 # Flow: Prometheus metric -> AlertRule -> Alertmanager -> EDA/AAP -> Playbook
 # The node name comes from the Prometheus metric label ($labels.node)
 
-apiVersion: monitoring.rhobs/v1alpha
+apiVersion: monitoring.rhobs/v1alpha1
 kind: AlertmanagerConfig
 metadata:
   name: sdn-node-monitor-alertmanager-config
