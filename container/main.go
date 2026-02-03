@@ -456,7 +456,17 @@ func main() {
 	defer cancel()
 
 	// Start HTTP server for Prometheus metrics
-	http.Handle("/metrics", promhttp.Handler())
+	metricsHandler := promhttp.Handler()
+	http.Handle("/metrics", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logrus.WithFields(logrus.Fields{
+			"method":  r.Method,
+			"path":    r.URL.Path,
+			"remote":  r.RemoteAddr,
+			"node":    nodeName,
+			"ua":      r.UserAgent(),
+		}).Info("Metrics scrape request received")
+		metricsHandler.ServeHTTP(w, r)
+	}))
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
