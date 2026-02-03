@@ -12,17 +12,19 @@
 
   rules:
     - name: Process SDN BGP Daemon Down Alert
-      # AAP 2.5: event is wrapped under event.payload
+      # AAP 2.5: event is wrapped under event.payload (Alertmanager default payload)
       # Single string expression required
-      condition: '(event.payload.alertname == "SDNBGPDaemonDown" or event.payload.alertname == "SDNFRRBGPDaemonDown") and event.payload.labels.component == "bgp"'
+      condition: >
+        (event.payload.commonLabels.alertname == "SDNBGPDaemonDown" or event.payload.commonLabels.alertname == "SDNFRRBGPDaemonDown")
+        and (event.payload.commonLabels.component == "bgp" or event.payload.alerts[0].labels.component == "bgp")
       action:
         run_job_template:
           name: "SDN BGP Daemon Remediation"
           organization: "Default"
           inventory: "SDN Nodes Inventory"
           extra_vars:
-            node_name: "{{ event.payload.labels.node }}"
-            alert_name: "{{ event.payload.alertname }}"
-            severity: "{{ event.payload.labels.severity }}"
-            eda_action: "{{ event.payload.annotations.eda_action | default('remediate_bgp') }}"
-            eda_playbook: "{{ event.payload.annotations.eda_playbook | default('restart-frr-bgp-agent.yml') }}"
+            node_name: "{{ event.payload.commonLabels.node | default(event.payload.alerts[0].labels.node | default(event.payload.alerts[0].annotations.eda_node)) }}"
+            alert_name: "{{ event.payload.commonLabels.alertname | default(event.payload.alerts[0].labels.alertname) }}"
+            severity: "{{ event.payload.commonLabels.severity | default(event.payload.alerts[0].labels.severity) }}"
+            eda_action: "{{ event.payload.alerts[0].annotations.eda_action | default('remediate_bgp') }}"
+            eda_playbook: "{{ event.payload.alerts[0].annotations.eda_playbook | default('restart-frr-bgp-agent.yml') }}"

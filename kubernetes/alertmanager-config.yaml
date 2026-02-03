@@ -46,35 +46,8 @@ spec:
           #       key: token
           sendResolved: false
           httpMethod: POST
-          # Custom headers for EDA/AAP
-          headers:
-            Content-Type: 'application/json'
-          # Body contains the full Alertmanager payload structure
-          # The playbook extracts node_name from multiple possible locations
-          body: |
-            {
-              "eda_event": {
-                "labels": {
-                  "alertname": "{{ .GroupLabels.alertname }}",
-                  "node": "{{ .CommonLabels.node }}",
-                  "severity": "{{ .CommonLabels.severity }}",
-                  "component": "{{ .CommonLabels.component }}",
-                  "service": "{{ .CommonLabels.service }}"
-                },
-                "annotations": {
-                  "summary": "{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}",
-                  "description": "{{ range .Alerts }}{{ .Annotations.description }}{{ end }}",
-                  "eda_node": "{{ range .Alerts }}{{ .Annotations.eda_node }}{{ end }}",
-                  "eda_action": "{{ range .Alerts }}{{ .Annotations.eda_action }}{{ end }}",
-                  "eda_playbook": "{{ range .Alerts }}{{ .Annotations.eda_playbook }}{{ end }}"
-                },
-                "extra_vars": {
-                  "node_name": "{{ .CommonLabels.node }}",
-                  "alert_name": "{{ .GroupLabels.alertname }}",
-                  "severity": "{{ .CommonLabels.severity }}"
-                }
-              }
-            }
+          # Let Alertmanager send the default webhook payload
+          # Rulebook will parse event.payload.commonLabels / event.payload.alerts
 
 ---
 # Optional Secret for webhook token (create later if needed)
