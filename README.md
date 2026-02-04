@@ -2,7 +2,7 @@
 
 A monitoring and remediation system for SDN nodes running FRR and BGP. This project consists of three main components:
 
-1. **Container (Golang)**: Monitors BGP daemon status and exposes Prometheus metrics
+1. **Container (Golang)**: Monitors BGP daemon status and exposes Prometheus metrics (SDN and non-SDN modes)
 2. **AlertRule CR**: Prometheus alerting rules that trigger remediation
 3. **Remediation Playbook**: Ansible playbook that restarts FRR and OVN BGP agent
 
@@ -48,7 +48,7 @@ A monitoring and remediation system for SDN nodes running FRR and BGP. This proj
 └─────────────────┘
 ```
 
-### Metric Pattern (Following frr_exporter)
+### Metric Pattern (SDN mode, following frr_exporter)
 
 The monitor follows the **frr_exporter pattern** for efficient metric cardinality:
 
@@ -69,7 +69,8 @@ The AlertRule checks for metric **existence** (`sdn_bgp_daemon_down > 0`), not a
 
 A lightweight Golang container that:
 - Runs as a background daemon
-- Periodically checks FRR container daemons via `podman exec frr vtysh -c "show daemons"`
+- Periodically checks FRR container daemons via `podman exec frr vtysh -c "show daemons"` (SDN mode)
+- In non-SDN mode, monitors `bgpd` via `systemctl` and restarts on a schedule and on failures
 - Verifies all required daemons are present: `zebra`, `bgpd`, `watchfrr`, `staticd`, `bfdd`
 - Exposes Prometheus metrics at `/metrics`
 - Uses logrus for structured logging (debug, info, warn, critical)
@@ -77,15 +78,24 @@ A lightweight Golang container that:
 
 **Configuration via environment variables:**
 - `NODE_NAME`: Node identifier (defaults to hostname)
+- `NODE_MODE`: `sdn` or `non-sdn` (default: `sdn`)
 - `LOG_LEVEL`: Logging level - debug, info, warn, error (default: info)
 - `CHECK_INTERVAL`: How often to check BGP status (default: 30s)
 - `METRICS_PORT`: Port for metrics endpoint (default: 8080)
+- `RESTART_INTERVAL`: Non-SDN periodic restart interval (default: 5m)
+- `BGPD_SERVICE`: Non-SDN systemd service name (default: bgpd)
+- `TEST_MODE`: off | on | flip (default: off)
+- `TEST_FLIP_INTERVAL`: How often to flip when TEST_MODE=flip (default: 4 checks)
+- `BUFFER_WINDOW`: Rolling window for pre-failure state capture (default: 30s)
 
 **Prometheus Metrics:**
 - `sdn_bgp_daemon_down{node}`: Gauge (1 = down, metric only exists when BGP is down)
   - **Cardinality Reduction**: This metric is only exposed when BGP is down
   - When BGP is running, the metric is deleted and not exposed at all
   - This follows the frr_exporter pattern for efficient metric cardinality
+- `sdn_simple_bgpd_restart_total{node,reason}`: Counter (non-SDN mode only)
+  - Increments on bgpd restarts
+  - `reason`: interval | inactive | test_mode
 
 ### 2. Prometheus ScrapeConfig
 
@@ -108,7 +118,7 @@ The `kubernetes/scrapeconfig.yaml` file contains the Prometheus scrape configura
 ### 3. Prometheus AlertRule
 
 Defines alerting rules that:
-- Monitor `sdn_bgp_daemon_status == 0` for 1 minute
+- Monitor `sdn_bgp_daemon_down > 0` for 1 minute
 - Trigger alerts with node information
 - Route to EDA/AAP webhook receiver via Alertmanager
 
@@ -139,6 +149,7 @@ sdn-node-monitor/
 │   └── alertmanager-config.yaml  # Alertmanager config example
 ├── ansible/               # Remediation playbooks
 │   ├── restart-frr-bgp-agent.yml  # Main remediation playbook
+│   ├── deploy-sdn-node-monitor.yml # Deploy container (SDN/non-SDN)
 │   └── eda-event-example.json    # Example EDA event
 ├── Makefile               # Make targets for common tasks
 └── README.md              # This file
@@ -224,25 +235,30 @@ go build -o sdn-node-monitor main.go
 ### Run Locally
 
 ```bash
-# Using the run script
+# Using the run script (SDN mode default)
 cd container
 ./runme-local.sh
+
+# Non-SDN mode example
+NODE_MODE=non-sdn BGPD_SERVICE=bgpd RESTART_INTERVAL=5m ./runme-local.sh
 
 # Or using Make
 make docker-run
 
-# Or manually with Podman
+# Or manually with Podman (SDN mode example)
 cd container
 podman run -d \
   --name sdn-node-monitor-local-instance \
   --hostname $(hostname) \
   -e NODE_NAME=$(hostname) \
+  -e NODE_MODE=sdn \
   -e LOG_LEVEL=info \
   -e CHECK_INTERVAL=30s \
   -e METRICS_PORT=8080 \
-  -p 8080:8080 \
+  -p 8989:8080 \
   --network host \
-  -v /var/run/frr:/var/run/frr \
+  -v /run/podman:/run/podman:rw \
+  --privileged \
   --restart always \
   sdn-node-monitor:local
 ```
@@ -335,7 +351,8 @@ All logs include structured fields:
 
 - Verify PrometheusRule is applied and recognized
 - Check Alertmanager is configured to receive alerts
-- Verify the metric `sdn_bgp_daemon_down` is being collected when BGP is down
+- Verify the metric `sdn_bgp_daemon_down` is being collected when BGP is down (SDN mode)
+- For non-SDN mode, verify `sdn_simple_bgpd_restart_total` increments on restarts
 - Remember: the metric only exists when BGP is down, so you won't see it when healthy
 
 ### Remediation playbook fails

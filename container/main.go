@@ -28,16 +28,26 @@ var (
 		},
 		[]string{"node"},
 	)
+	bgpRestartTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "sdn_simple_bgpd_restart_total",
+			Help: "Total number of bgpd restarts performed by sdn-node-monitor (non-SDN mode)",
+		},
+		[]string{"node", "reason"},
+	)
 
 	// Configuration
-	checkInterval   time.Duration = 30 * time.Second
-	nodeName        string
-	logLevel        string = "info"
-	gitCommit       string = "unknown"
-	testMode        string = "off"
-	testFlipInterval int  = 4
-	bufferWindow    time.Duration = 30 * time.Second
-	maxBufferSize   int          = 10
+	checkInterval    time.Duration = 30 * time.Second
+	restartInterval  time.Duration = 5 * time.Minute
+	nodeName         string
+	nodeMode         string = "sdn"
+	bgpdService      string = "bgpd"
+	logLevel         string = "info"
+	gitCommit        string = "unknown"
+	testMode         string = "off"
+	testFlipInterval int    = 4
+	bufferWindow     time.Duration = 30 * time.Second
+	maxBufferSize    int           = 10
 
 	// State buffer for capturing logs before condition fires
 	stateBuffer struct {
@@ -60,12 +70,15 @@ type StateSnapshot struct {
 	OVNBGPStatus   string
 	OVNBGPLogs     string
 	FRRDaemonCheck string
+	BGPDStatus     string
+	BGPDLogs       string
 	SystemState    string
 }
 
 func init() {
 	// Register Prometheus metrics
 	prometheus.MustRegister(bgpDaemonDown)
+	prometheus.MustRegister(bgpRestartTotal)
 
 	// Get node name from environment or hostname
 	nodeName = os.Getenv("NODE_NAME")
@@ -82,6 +95,24 @@ func init() {
 	// Get log level from environment
 	if envLogLevel := os.Getenv("LOG_LEVEL"); envLogLevel != "" {
 		logLevel = envLogLevel
+	}
+
+	// Get node mode from environment (sdn or non-sdn)
+	if envMode := os.Getenv("NODE_MODE"); envMode != "" {
+		mode := strings.ToLower(strings.TrimSpace(envMode))
+		switch mode {
+		case "sdn":
+			nodeMode = "sdn"
+		case "non-sdn", "nonsdn", "non_sdn":
+			nodeMode = "non-sdn"
+		default:
+			logrus.WithField("node_mode", envMode).Warn("Invalid NODE_MODE, must be 'sdn' or 'non-sdn'. Defaulting to 'sdn'")
+		}
+	}
+
+	// Get bgpd service name from environment (non-SDN mode)
+	if envService := os.Getenv("BGPD_SERVICE"); envService != "" {
+		bgpdService = envService
 	}
 
 	// Set logrus level
@@ -102,6 +133,15 @@ func init() {
 			checkInterval = parsed
 		} else {
 			logrus.WithError(err).Warnf("Invalid CHECK_INTERVAL '%s', using default 30s", envInterval)
+		}
+	}
+
+	// Get restart interval from environment (non-SDN mode)
+	if envRestart := os.Getenv("RESTART_INTERVAL"); envRestart != "" {
+		if parsed, err := time.ParseDuration(envRestart); err == nil {
+			restartInterval = parsed
+		} else {
+			logrus.WithError(err).Warnf("Invalid RESTART_INTERVAL '%s', using default 5m", envRestart)
 		}
 	}
 
@@ -138,6 +178,17 @@ func init() {
 	stateBuffer.snapshots = make([]StateSnapshot, 0, maxBufferSize)
 }
 
+// runHostCommand executes a command on the host using nsenter when available.
+func runHostCommand(ctx context.Context, args ...string) ([]byte, error) {
+	if _, err := exec.LookPath("nsenter"); err == nil {
+		nsenterArgs := append([]string{"--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--"}, args...)
+		cmd := exec.CommandContext(ctx, "nsenter", nsenterArgs...)
+		return cmd.CombinedOutput()
+	}
+	cmd := exec.CommandContext(ctx, args...)
+	return cmd.CombinedOutput()
+}
+
 // captureStateSnapshot captures current system state
 func captureStateSnapshot(ctx context.Context) StateSnapshot {
 	snapshot := StateSnapshot{
@@ -172,6 +223,40 @@ func captureStateSnapshot(ctx context.Context) StateSnapshot {
 	cmd = exec.CommandContext(ctx, "dmesg", "-T", "--since", "30s")
 	if output, err := cmd.CombinedOutput(); err == nil {
 		// Limit to last 50 lines to avoid too much data
+		lines := strings.Split(string(output), "\n")
+		if len(lines) > 50 {
+			lines = lines[len(lines)-50:]
+		}
+		snapshot.SystemState = strings.Join(lines, "\n")
+	} else {
+		snapshot.SystemState = fmt.Sprintf("Error capturing system logs: %v", err)
+	}
+
+	return snapshot
+}
+
+// captureNonSDNSnapshot captures system state for non-SDN mode
+func captureNonSDNSnapshot(ctx context.Context) StateSnapshot {
+	snapshot := StateSnapshot{
+		Timestamp: time.Now(),
+	}
+
+	// Capture bgpd service status
+	if output, err := runHostCommand(ctx, "systemctl", "status", bgpdService, "--no-pager", "-l"); err == nil {
+		snapshot.BGPDStatus = string(output)
+	} else {
+		snapshot.BGPDStatus = fmt.Sprintf("Error capturing bgpd status: %v", err)
+	}
+
+	// Capture bgpd recent logs
+	if output, err := runHostCommand(ctx, "journalctl", "-u", bgpdService, "--since", "30s", "--no-pager", "-n", "50"); err == nil {
+		snapshot.BGPDLogs = string(output)
+	} else {
+		snapshot.BGPDLogs = fmt.Sprintf("Error capturing bgpd logs: %v", err)
+	}
+
+	// System state (dmesg tail - last 30 seconds)
+	if output, err := runHostCommand(ctx, "dmesg", "-T", "--since", "30s"); err == nil {
 		lines := strings.Split(string(output), "\n")
 		if len(lines) > 50 {
 			lines = lines[len(lines)-50:]
@@ -230,6 +315,12 @@ func dumpBuffer() {
 		buffer.WriteString(fmt.Sprintf("FRR Logs:\n%s\n", snap.FRRLogs))
 		buffer.WriteString(fmt.Sprintf("OVN BGP Agent Status:\n%s\n", snap.OVNBGPStatus))
 		buffer.WriteString(fmt.Sprintf("OVN BGP Agent Logs:\n%s\n", snap.OVNBGPLogs))
+		if snap.BGPDStatus != "" {
+			buffer.WriteString(fmt.Sprintf("BGPD Status:\n%s\n", snap.BGPDStatus))
+		}
+		if snap.BGPDLogs != "" {
+			buffer.WriteString(fmt.Sprintf("BGPD Logs:\n%s\n", snap.BGPDLogs))
+		}
 		if snap.SystemState != "" {
 			buffer.WriteString(fmt.Sprintf("System Logs:\n%s\n", snap.SystemState))
 		}
@@ -380,6 +471,7 @@ func runMonitor(ctx context.Context) {
 	logFields := logrus.Fields{
 		"node":           nodeName,
 		"check_interval": checkInterval,
+		"node_mode":      nodeMode,
 	}
 	if testMode != "off" {
 		logFields["test_mode"] = testMode
@@ -429,6 +521,87 @@ func runMonitor(ctx context.Context) {
 	}
 }
 
+// checkBGPDService returns true when bgpd is active
+func checkBGPDService(ctx context.Context) (bool, string) {
+	if _, err := runHostCommand(ctx, "systemctl", "is-active", "--quiet", bgpdService); err != nil {
+		return false, fmt.Sprintf("bgpd service '%s' is not active: %v", bgpdService, err)
+	}
+	return true, ""
+}
+
+// restartBGPD restarts bgpd and increments the restart metric
+func restartBGPD(ctx context.Context, reason string) {
+	logrus.WithFields(logrus.Fields{
+		"node":   nodeName,
+		"reason": reason,
+	}).Warn("Restarting bgpd service")
+
+	_, stopErr := runHostCommand(ctx, "systemctl", "stop", bgpdService)
+	if stopErr != nil {
+		logrus.WithError(stopErr).Warn("Failed to stop bgpd, will attempt restart")
+	}
+
+	_, startErr := runHostCommand(ctx, "systemctl", "start", bgpdService)
+	if startErr != nil {
+		logrus.WithError(startErr).Warn("Failed to start bgpd, attempting systemctl restart")
+		_, _ = runHostCommand(ctx, "systemctl", "restart", bgpdService)
+	}
+
+	bgpRestartTotal.WithLabelValues(nodeName, reason).Inc()
+}
+
+// runNonSDNMonitor monitors bgpd on non-SDN nodes (systemctl)
+func runNonSDNMonitor(ctx context.Context) {
+	checkTicker := time.NewTicker(checkInterval)
+	restartTicker := time.NewTicker(restartInterval)
+	defer checkTicker.Stop()
+	defer restartTicker.Stop()
+
+	logFields := logrus.Fields{
+		"node":             nodeName,
+		"check_interval":   checkInterval,
+		"restart_interval": restartInterval,
+		"node_mode":        nodeMode,
+		"bgpd_service":     bgpdService,
+	}
+	logrus.WithFields(logFields).Info("Starting bgpd monitor (non-SDN mode)")
+
+	for {
+		select {
+		case <-ctx.Done():
+			logrus.Info("Monitor context cancelled, shutting down")
+			return
+		case <-restartTicker.C:
+			restartBGPD(ctx, "interval")
+		case <-checkTicker.C:
+			// Force test mode condition if enabled
+			if shouldForceTestCondition() {
+				addToBuffer(captureNonSDNSnapshot(ctx))
+				dumpBuffer()
+				restartBGPD(ctx, "test_mode")
+				continue
+			}
+
+			active, message := checkBGPDService(ctx)
+			if !active {
+				logrus.WithFields(logrus.Fields{
+					"node":    nodeName,
+					"service": bgpdService,
+				}).Error(message)
+				addToBuffer(captureNonSDNSnapshot(ctx))
+				dumpBuffer()
+				restartBGPD(ctx, "inactive")
+				continue
+			}
+
+			logrus.WithFields(logrus.Fields{
+				"node":    nodeName,
+				"service": bgpdService,
+			}).Debug("bgpd service is active")
+		}
+	}
+}
+
 func main() {
 	logrus.WithFields(logrus.Fields{
 		"git_commit": gitCommit,
@@ -439,6 +612,11 @@ func main() {
 		"check_interval": checkInterval,
 		"log_level":      logLevel,
 		"git_commit":     gitCommit,
+		"node_mode":      nodeMode,
+	}
+	if nodeMode == "non-sdn" {
+		configFields["restart_interval"] = restartInterval
+		configFields["bgpd_service"] = bgpdService
 	}
 	if testMode != "off" {
 		configFields["test_mode"] = testMode
@@ -491,7 +669,11 @@ func main() {
 	}()
 
 	// Start monitoring loop
-	go runMonitor(ctx)
+	if nodeMode == "non-sdn" {
+		go runNonSDNMonitor(ctx)
+	} else {
+		go runMonitor(ctx)
+	}
 
 	// Wait for interrupt signal for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
