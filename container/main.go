@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -15,6 +19,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/semconv/v1.24.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -37,17 +48,24 @@ var (
 	)
 
 	// Configuration
-	checkInterval    time.Duration = 30 * time.Second
-	restartInterval  time.Duration = 5 * time.Minute
-	nodeName         string
-	nodeMode         string = "sdn"
-	bgpdService      string = "bgpd"
-	logLevel         string = "info"
-	gitCommit        string = "unknown"
-	testMode         string = "off"
-	testFlipInterval int    = 4
-	bufferWindow     time.Duration = 30 * time.Second
-	maxBufferSize    int           = 10
+	checkInterval       time.Duration = 30 * time.Second
+	restartInterval     time.Duration = 5 * time.Minute
+	nodeName            string
+	nodeMode            string        = "sdn"
+	bgpdService         string        = "bgpd"
+	gossipEnabled       bool          = false
+	gossipPort          string        = "9393"
+	gossipPeers         []string
+	gossipHelloInterval time.Duration = 2 * time.Minute
+	otelEnabled         bool          = false
+	otelEndpoint        string        = ""
+	otelServiceName     string        = "sdn-node-monitor"
+	logLevel            string        = "info"
+	gitCommit           string        = "unknown"
+	testMode            string        = "off"
+	testFlipInterval    int           = 4
+	bufferWindow        time.Duration = 30 * time.Second
+	maxBufferSize       int           = 10
 
 	// State buffer for capturing logs before condition fires
 	stateBuffer struct {
@@ -59,8 +77,20 @@ var (
 	testModeState struct {
 		sync.RWMutex
 		flipState bool
-		flipCount  int
+		flipCount int
 	}
+
+	// Gossip state
+	gossipState struct {
+		sync.RWMutex
+		lastTrace trace.SpanContext
+	}
+
+	httpClient = &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	tracer = otel.Tracer("sdn-node-monitor")
 )
 
 // StateSnapshot captures system state at a point in time
@@ -73,6 +103,16 @@ type StateSnapshot struct {
 	BGPDStatus     string
 	BGPDLogs       string
 	SystemState    string
+}
+
+type GossipMessage struct {
+	Node      string `json:"node"`
+	Mode      string `json:"mode"`
+	Event     string `json:"event"`
+	Reason    string `json:"reason,omitempty"`
+	TraceID   string `json:"trace_id,omitempty"`
+	SpanID    string `json:"span_id,omitempty"`
+	Timestamp string `json:"timestamp"`
 }
 
 func init() {
@@ -107,6 +147,50 @@ func init() {
 			nodeMode = "non-sdn"
 		default:
 			logrus.WithField("node_mode", envMode).Warn("Invalid NODE_MODE, must be 'sdn' or 'non-sdn'. Defaulting to 'sdn'")
+		}
+	}
+
+	// Gossip configuration
+	if envGossip := os.Getenv("GOSSIP_ENABLED"); envGossip != "" {
+		if parsed, ok := parseBool(envGossip); ok {
+			gossipEnabled = parsed
+		} else {
+			logrus.WithField("gossip_enabled", envGossip).Warn("Invalid GOSSIP_ENABLED, must be true/false")
+		}
+	}
+	if envPort := os.Getenv("GOSSIP_PORT"); envPort != "" {
+		gossipPort = envPort
+	}
+	if envPeers := os.Getenv("GOSSIP_PEERS"); envPeers != "" {
+		parts := strings.Split(envPeers, ",")
+		for _, part := range parts {
+			peer := strings.TrimSpace(part)
+			if peer != "" {
+				gossipPeers = append(gossipPeers, peer)
+			}
+		}
+	}
+	if envHello := os.Getenv("GOSSIP_HELLO_INTERVAL"); envHello != "" {
+		if parsed, err := time.ParseDuration(envHello); err == nil {
+			gossipHelloInterval = parsed
+		} else {
+			logrus.WithError(err).Warnf("Invalid GOSSIP_HELLO_INTERVAL '%s', using default 2m", envHello)
+		}
+	}
+
+	// OpenTelemetry configuration
+	if envService := os.Getenv("OTEL_SERVICE_NAME"); envService != "" {
+		otelServiceName = envService
+	}
+	if envEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); envEndpoint != "" {
+		otelEndpoint = envEndpoint
+		otelEnabled = true
+	}
+	if envOTEL := os.Getenv("OTEL_ENABLED"); envOTEL != "" {
+		if parsed, ok := parseBool(envOTEL); ok {
+			otelEnabled = parsed
+		} else {
+			logrus.WithField("otel_enabled", envOTEL).Warn("Invalid OTEL_ENABLED, must be true/false")
 		}
 	}
 
@@ -178,15 +262,298 @@ func init() {
 	stateBuffer.snapshots = make([]StateSnapshot, 0, maxBufferSize)
 }
 
+func parseBool(value string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "1", "yes", "on":
+		return true, true
+	case "false", "0", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 // runHostCommand executes a command on the host using nsenter when available.
 func runHostCommand(ctx context.Context, args ...string) ([]byte, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("runHostCommand requires at least one argument")
+	}
 	if _, err := exec.LookPath("nsenter"); err == nil {
 		nsenterArgs := append([]string{"--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--"}, args...)
 		cmd := exec.CommandContext(ctx, "nsenter", nsenterArgs...)
 		return cmd.CombinedOutput()
 	}
-	cmd := exec.CommandContext(ctx, args...)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	return cmd.CombinedOutput()
+}
+
+func initTracing(ctx context.Context) (func(context.Context) error, error) {
+	if !otelEnabled || otelEndpoint == "" {
+		return nil, nil
+	}
+
+	endpoint := otelEndpoint
+	var opts []otlptracehttp.Option
+	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		parsed, err := url.Parse(endpoint)
+		if err != nil {
+			return nil, fmt.Errorf("invalid OTEL_EXPORTER_OTLP_ENDPOINT: %w", err)
+		}
+		if parsed.Host == "" {
+			return nil, fmt.Errorf("invalid OTEL_EXPORTER_OTLP_ENDPOINT host: %s", endpoint)
+		}
+		opts = append(opts, otlptracehttp.WithEndpoint(parsed.Host))
+		if parsed.Path != "" && parsed.Path != "/" {
+			opts = append(opts, otlptracehttp.WithURLPath(parsed.Path))
+		}
+		if parsed.Scheme == "http" {
+			opts = append(opts, otlptracehttp.WithInsecure())
+		}
+	} else {
+		opts = append(opts, otlptracehttp.WithEndpoint(endpoint))
+		opts = append(opts, otlptracehttp.WithInsecure())
+	}
+
+	exporter, err := otlptracehttp.New(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create OTLP exporter: %w", err)
+	}
+
+	res, err := resource.New(ctx,
+		resource.WithAttributes(
+			semconv.ServiceName(otelServiceName),
+			attribute.String("node", nodeName),
+			attribute.String("node_mode", nodeMode),
+		),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create resource: %w", err)
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(res),
+	)
+	otel.SetTracerProvider(tp)
+	tracer = otel.Tracer(otelServiceName)
+
+	return tp.Shutdown, nil
+}
+
+func normalizePeer(peer string) (string, error) {
+	peer = strings.TrimSpace(peer)
+	if peer == "" {
+		return "", fmt.Errorf("empty peer")
+	}
+	if !strings.Contains(peer, "://") {
+		peer = "http://" + peer
+	}
+	parsed, err := url.Parse(peer)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("invalid peer host: %s", peer)
+	}
+	if !strings.Contains(parsed.Host, ":") {
+		parsed.Host = net.JoinHostPort(parsed.Host, gossipPort)
+	}
+	if parsed.Path == "" || parsed.Path == "/" {
+		parsed.Path = "/gossip"
+	}
+	return parsed.String(), nil
+}
+
+func storeGossipLink(sc trace.SpanContext) {
+	if !sc.IsValid() {
+		return
+	}
+	gossipState.Lock()
+	defer gossipState.Unlock()
+	gossipState.lastTrace = sc
+}
+
+func getGossipLink() (trace.SpanContext, bool) {
+	gossipState.RLock()
+	defer gossipState.RUnlock()
+	if gossipState.lastTrace.IsValid() {
+		return gossipState.lastTrace, true
+	}
+	return trace.SpanContext{}, false
+}
+
+func startEventSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	opts := []trace.SpanStartOption{trace.WithAttributes(attrs...)}
+	if link, ok := getGossipLink(); ok {
+		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: link}))
+	}
+	return tracer.Start(ctx, name, opts...)
+}
+
+func sendGossip(ctx context.Context, eventName, reason string) {
+	if !gossipEnabled || len(gossipPeers) == 0 {
+		return
+	}
+
+	sc := trace.SpanContextFromContext(ctx)
+	msg := GossipMessage{
+		Node:      nodeName,
+		Mode:      nodeMode,
+		Event:     eventName,
+		Reason:    reason,
+		TraceID:   sc.TraceID().String(),
+		SpanID:    sc.SpanID().String(),
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		logrus.WithError(err).Warn("Failed to marshal gossip message")
+		return
+	}
+
+	for _, peer := range gossipPeers {
+		endpoint, err := normalizePeer(peer)
+		if err != nil {
+			logrus.WithError(err).WithField("peer", peer).Warn("Invalid gossip peer")
+			continue
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+		if err != nil {
+			logrus.WithError(err).WithField("peer", peer).Warn("Failed to create gossip request")
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			logrus.WithError(err).WithField("peer", peer).Warn("Failed to send gossip message")
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			logrus.WithField("peer", peer).WithField("status", resp.StatusCode).Warn("Gossip peer returned non-2xx")
+		}
+	}
+}
+
+func startGossipServer(ctx context.Context) {
+	if !gossipEnabled {
+		return
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/gossip", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var msg GossipMessage
+		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+			logrus.WithError(err).Warn("Failed to decode gossip message")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		var link trace.SpanContext
+		if msg.TraceID != "" && msg.SpanID != "" {
+			if tid, err := trace.TraceIDFromHex(msg.TraceID); err == nil {
+				if sid, err := trace.SpanIDFromHex(msg.SpanID); err == nil {
+					link = trace.NewSpanContext(trace.SpanContextConfig{
+						TraceID:    tid,
+						SpanID:     sid,
+						TraceFlags: trace.FlagsSampled,
+						Remote:     true,
+					})
+					storeGossipLink(link)
+				}
+			}
+		}
+
+		var span trace.Span
+		if link.IsValid() {
+			_, span = tracer.Start(ctx, "gossip.receive",
+				trace.WithLinks(trace.Link{SpanContext: link}),
+				trace.WithAttributes(
+					attribute.String("event", msg.Event),
+					attribute.String("reason", msg.Reason),
+					attribute.String("from_node", msg.Node),
+				),
+			)
+		} else {
+			_, span = tracer.Start(ctx, "gossip.receive",
+				trace.WithAttributes(
+					attribute.String("event", msg.Event),
+					attribute.String("reason", msg.Reason),
+					attribute.String("from_node", msg.Node),
+				),
+			)
+		}
+		span.End()
+
+		logrus.WithFields(logrus.Fields{
+			"event":  msg.Event,
+			"reason": msg.Reason,
+			"node":   msg.Node,
+		}).Info("Gossip message received")
+
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	server := &http.Server{
+		Addr:    ":" + gossipPort,
+		Handler: mux,
+	}
+
+	go func() {
+		logrus.WithField("port", gossipPort).Info("Starting gossip server")
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logrus.WithError(err).Error("Gossip server failed")
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logrus.WithError(err).Warn("Failed to shut down gossip server")
+		}
+	}()
+}
+
+func startGossipHelloLoop(ctx context.Context) {
+	if !gossipEnabled {
+		return
+	}
+	sendHello := func() {
+		spanCtx, span := startEventSpan(ctx, "gossip.hello",
+			attribute.String("node", nodeName),
+			attribute.String("mode", nodeMode),
+		)
+		sendGossip(spanCtx, "gossip_hello", "")
+		span.End()
+	}
+	sendHello()
+	if gossipHelloInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(gossipHelloInterval)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				ticker.Stop()
+				return
+			case <-ticker.C:
+				sendHello()
+			}
+		}
+	}()
 }
 
 // captureStateSnapshot captures current system state
@@ -330,8 +697,8 @@ func dumpBuffer() {
 
 	// Log the buffer dump
 	logrus.WithFields(logrus.Fields{
-		"node":         nodeName,
-		"level":        "critical",
+		"node":        nodeName,
+		"level":       "critical",
 		"buffer_dump": buffer.String(),
 	}).Error("FRR daemons condition fired - state buffer dump")
 
@@ -371,6 +738,12 @@ func checkBGPDaemon(ctx context.Context) (bool, error) {
 		"node": nodeName,
 	}).Debug("Checking FRR daemons status")
 
+	// Track previous state to detect transition
+	wasDown := false
+	if _, err := bgpDaemonDown.GetMetricWithLabelValues(nodeName); err == nil {
+		wasDown = true
+	}
+
 	// Check if test mode should force condition
 	forceCondition := shouldForceTestCondition()
 	if forceCondition {
@@ -379,6 +752,15 @@ func checkBGPDaemon(ctx context.Context) (bool, error) {
 			"test_mode": testMode,
 		}).Warn("TEST MODE: Forcing condition ON (FRR daemons down)")
 		bgpDaemonDown.WithLabelValues(nodeName).Set(1)
+		if !wasDown {
+			spanCtx, span := startEventSpan(ctx, "frr.daemon_down",
+				attribute.String("reason", "test_mode"),
+				attribute.String("node", nodeName),
+				attribute.String("mode", nodeMode),
+			)
+			sendGossip(spanCtx, "frr_daemon_down", "test_mode")
+			span.End()
+		}
 		return false, fmt.Errorf("test mode forcing condition")
 	}
 
@@ -392,34 +774,35 @@ func checkBGPDaemon(ctx context.Context) (bool, error) {
 	// Using -c flag to run command non-interactively (no -it needed)
 	cmd := exec.CommandContext(ctx, "podman", "exec", "frr", "vtysh", "-c", "show daemons")
 	output, err := cmd.CombinedOutput()
-	
+
 	// Store FRR daemon check output in snapshot
 	snapshot.FRRDaemonCheck = string(output)
 	if err != nil {
 		snapshot.FRRDaemonCheck = fmt.Sprintf("ERROR: %v\nOUTPUT: %s", err, string(output))
 	}
 
-	// Track previous state to detect transition
-	wasDown := false
-	if _, err := bgpDaemonDown.GetMetricWithLabelValues(nodeName); err == nil {
-		wasDown = true
-	}
-
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
-			"node":    nodeName,
-			"error":   err.Error(),
-			"output":  string(output),
+			"node":   nodeName,
+			"error":  err.Error(),
+			"output": string(output),
 		}).Error("Failed to execute podman exec frr vtysh command")
-		
+
 		// Add snapshot to buffer
 		addToBuffer(snapshot)
-		
+
 		// If transitioning from OK to DOWN, dump buffer
 		if !wasDown {
 			dumpBuffer()
+			spanCtx, span := startEventSpan(ctx, "frr.daemon_down",
+				attribute.String("reason", "exec_error"),
+				attribute.String("node", nodeName),
+				attribute.String("mode", nodeMode),
+			)
+			sendGossip(spanCtx, "frr_daemon_down", "exec_error")
+			span.End()
 		}
-		
+
 		// On error, assume daemons are down and expose metric
 		bgpDaemonDown.WithLabelValues(nodeName).Set(1)
 		return false, fmt.Errorf("podman exec frr vtysh command failed: %w", err)
@@ -445,15 +828,22 @@ func checkBGPDaemon(ctx context.Context) (bool, error) {
 		return true, nil
 	} else {
 		// One or more daemons are missing - EXPOSE the metric with value 1
-		
+
 		// Add snapshot to buffer
 		addToBuffer(snapshot)
-		
+
 		// If transitioning from OK to DOWN, dump buffer
 		if !wasDown {
 			dumpBuffer()
+			spanCtx, span := startEventSpan(ctx, "frr.daemon_down",
+				attribute.String("reason", "missing_daemons"),
+				attribute.String("node", nodeName),
+				attribute.String("mode", nodeMode),
+			)
+			sendGossip(spanCtx, "frr_daemon_down", "missing_daemons")
+			span.End()
 		}
-		
+
 		bgpDaemonDown.WithLabelValues(nodeName).Set(1)
 		logrus.WithFields(logrus.Fields{
 			"node":            nodeName,
@@ -530,7 +920,14 @@ func checkBGPDService(ctx context.Context) (bool, string) {
 }
 
 // restartBGPD restarts bgpd and increments the restart metric
-func restartBGPD(ctx context.Context, reason string) {
+func restartBGPD(ctx context.Context, reason string) bool {
+	spanCtx, span := startEventSpan(ctx, "bgpd.restart",
+		attribute.String("node", nodeName),
+		attribute.String("reason", reason),
+		attribute.String("service", bgpdService),
+	)
+	defer span.End()
+
 	logrus.WithFields(logrus.Fields{
 		"node":   nodeName,
 		"reason": reason,
@@ -547,7 +944,31 @@ func restartBGPD(ctx context.Context, reason string) {
 		_, _ = runHostCommand(ctx, "systemctl", "restart", bgpdService)
 	}
 
+	success := false
+	for i := 0; i < 3; i++ {
+		if active, _ := checkBGPDService(ctx); active {
+			success = true
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	if !success {
+		statusOut, err := runHostCommand(ctx, "systemctl", "status", bgpdService, "--no-pager", "-l")
+		if err != nil {
+			logrus.WithError(err).Error("bgpd restart verification failed")
+		} else {
+			logrus.WithField("status", string(statusOut)).Error("bgpd restart verification failed")
+		}
+	} else {
+		logrus.WithField("service", bgpdService).Info("bgpd restart verified as active")
+	}
+
+	span.SetAttributes(attribute.Bool("restart_success", success))
 	bgpRestartTotal.WithLabelValues(nodeName, reason).Inc()
+	sendGossip(spanCtx, "bgpd_restart", reason)
+
+	return success
 }
 
 // runNonSDNMonitor monitors bgpd on non-SDN nodes (systemctl)
@@ -572,13 +993,17 @@ func runNonSDNMonitor(ctx context.Context) {
 			logrus.Info("Monitor context cancelled, shutting down")
 			return
 		case <-restartTicker.C:
-			restartBGPD(ctx, "interval")
+			if ok := restartBGPD(ctx, "interval"); !ok {
+				logrus.WithField("service", bgpdService).Error("bgpd restart failed on interval")
+			}
 		case <-checkTicker.C:
 			// Force test mode condition if enabled
 			if shouldForceTestCondition() {
 				addToBuffer(captureNonSDNSnapshot(ctx))
 				dumpBuffer()
-				restartBGPD(ctx, "test_mode")
+				if ok := restartBGPD(ctx, "test_mode"); !ok {
+					logrus.WithField("service", bgpdService).Error("bgpd restart failed in test mode")
+				}
 				continue
 			}
 
@@ -590,7 +1015,9 @@ func runNonSDNMonitor(ctx context.Context) {
 				}).Error(message)
 				addToBuffer(captureNonSDNSnapshot(ctx))
 				dumpBuffer()
-				restartBGPD(ctx, "inactive")
+				if ok := restartBGPD(ctx, "inactive"); !ok {
+					logrus.WithField("service", bgpdService).Error("bgpd restart failed after inactive state")
+				}
 				continue
 			}
 
@@ -606,13 +1033,23 @@ func main() {
 	logrus.WithFields(logrus.Fields{
 		"git_commit": gitCommit,
 	}).Info("SDN Node Monitor starting up")
-	
+
 	configFields := logrus.Fields{
 		"node":           nodeName,
 		"check_interval": checkInterval,
 		"log_level":      logLevel,
 		"git_commit":     gitCommit,
 		"node_mode":      nodeMode,
+	}
+	if gossipEnabled {
+		configFields["gossip_enabled"] = gossipEnabled
+		configFields["gossip_port"] = gossipPort
+		configFields["gossip_peers"] = len(gossipPeers)
+	}
+	if otelEnabled {
+		configFields["otel_enabled"] = otelEnabled
+		configFields["otel_endpoint"] = otelEndpoint
+		configFields["otel_service"] = otelServiceName
 	}
 	if nodeMode == "non-sdn" {
 		configFields["restart_interval"] = restartInterval
@@ -633,15 +1070,32 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Initialize OpenTelemetry (optional)
+	if shutdown, err := initTracing(ctx); err != nil {
+		logrus.WithError(err).Warn("Failed to initialize OpenTelemetry")
+	} else if shutdown != nil {
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			if err := shutdown(shutdownCtx); err != nil {
+				logrus.WithError(err).Warn("Failed to shutdown OpenTelemetry")
+			}
+		}()
+	}
+
+	// Start gossip server (optional)
+	startGossipServer(ctx)
+	startGossipHelloLoop(ctx)
+
 	// Start HTTP server for Prometheus metrics
 	metricsHandler := promhttp.Handler()
 	http.Handle("/metrics", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logrus.WithFields(logrus.Fields{
-			"method":  r.Method,
-			"path":    r.URL.Path,
-			"remote":  r.RemoteAddr,
-			"node":    nodeName,
-			"ua":      r.UserAgent(),
+			"method": r.Method,
+			"path":   r.URL.Path,
+			"remote": r.RemoteAddr,
+			"node":   nodeName,
+			"ua":     r.UserAgent(),
 		}).Info("Metrics scrape request received")
 		metricsHandler.ServeHTTP(w, r)
 	}))

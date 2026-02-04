@@ -71,6 +71,8 @@ A lightweight Golang container that:
 - Runs as a background daemon
 - Periodically checks FRR container daemons via `podman exec frr vtysh -c "show daemons"` (SDN mode)
 - In non-SDN mode, monitors `bgpd` via `systemctl` and restarts on a schedule and on failures
+- Optionally gossips events on port **9393** to peer nodes
+- Optionally emits OpenTelemetry spans for event correlation
 - Verifies all required daemons are present: `zebra`, `bgpd`, `watchfrr`, `staticd`, `bfdd`
 - Exposes Prometheus metrics at `/metrics`
 - Uses logrus for structured logging (debug, info, warn, critical)
@@ -84,6 +86,13 @@ A lightweight Golang container that:
 - `METRICS_PORT`: Port for metrics endpoint (default: 8080)
 - `RESTART_INTERVAL`: Non-SDN periodic restart interval (default: 5m)
 - `BGPD_SERVICE`: Non-SDN systemd service name (default: bgpd)
+- `GOSSIP_ENABLED`: Enable gossip server and chatter (default: false)
+- `GOSSIP_PORT`: Gossip listener port (default: 9393)
+- `GOSSIP_PEERS`: Comma-separated peer list (`host:port` or URL)
+- `GOSSIP_HELLO_INTERVAL`: Periodic hello interval (default: 2m)
+- `OTEL_ENABLED`: Enable OpenTelemetry spans (default: false)
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP endpoint (e.g. `http://otel-collector:4318`)
+- `OTEL_SERVICE_NAME`: Service name for traces (default: sdn-node-monitor)
 - `TEST_MODE`: off | on | flip (default: off)
 - `TEST_FLIP_INTERVAL`: How often to flip when TEST_MODE=flip (default: 4 checks)
 - `BUFFER_WINDOW`: Rolling window for pre-failure state capture (default: 30s)
@@ -241,6 +250,11 @@ cd container
 
 # Non-SDN mode example
 NODE_MODE=non-sdn BGPD_SERVICE=bgpd RESTART_INTERVAL=5m ./runme-local.sh
+
+# Gossip + OTEL example
+GOSSIP_ENABLED=true GOSSIP_PEERS="10.0.0.10:9393,10.0.0.11:9393" \
+OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT="http://otel-collector:4318" \
+./runme-local.sh
 
 # Or using Make
 make docker-run
