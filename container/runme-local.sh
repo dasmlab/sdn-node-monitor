@@ -170,6 +170,14 @@ else
     echo "  ℹ️  Mounting user socket: ${PODMAN_SOCKET}"
 fi
 
+# For non-SDN mode, mount host root so systemctl can run via chroot/nsenter
+if [ "${NODE_MODE:-sdn}" = "non-sdn" ]; then
+    PODMAN_CMD="${PODMAN_CMD} \
+	-v /:/host:rw,rslave \
+	-e HOST_ROOT=/host"
+    echo "  ℹ️  Mounting host root at /host for systemctl (non-SDN mode)"
+fi
+
 # Add SELinux bypass and privileged mode for podman-in-podman BEFORE image name
 # This is required for containers to exec into other containers on RHEL
 # All flags must come BEFORE the image name in podman/docker commands
@@ -191,7 +199,7 @@ PODMAN_CMD="${PODMAN_CMD} \
 	-e CHECK_INTERVAL=\"${CHECK_INTERVAL:-30s}\" \
 	-e METRICS_PORT=\"${CONTAINER_METRICS_PORT}\" \
 	-e NODE_MODE=\"${NODE_MODE:-sdn}\" \
-	-e BGPD_SERVICE=\"${BGPD_SERVICE:-bgpd}\" \
+	-e BGPD_SERVICE=\"${BGPD_SERVICE:-edpm_ovn_bgp_agent.service}\" \
 	-e RESTART_INTERVAL=\"${RESTART_INTERVAL:-5m}\" \
 	-e GOSSIP_ENABLED=\"${GOSSIP_ENABLED:-false}\" \
 	-e GOSSIP_PORT=\"${GOSSIP_PORT:-9393}\" \

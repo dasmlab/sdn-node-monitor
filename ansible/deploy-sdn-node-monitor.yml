@@ -10,7 +10,7 @@
     metrics_port: 8989          # host port
     check_interval: "30s"
     restart_interval: "5m"      # non-sdn periodic restart
-    bgpd_service: "bgpd"        # non-sdn service name
+    bgpd_service: "edpm_ovn_bgp_agent.service" # non-sdn service name
     log_level: "info"
     test_mode: "off"
     test_flip_interval: ""
@@ -27,10 +27,11 @@
 
   tasks:
     - name: Pull SDN node monitor image
-      command: "podman pull {{ image }}"
+      ansible.builtin.command: "podman pull {{ image }}"
+      changed_when: false
 
     - name: Install systemd unit for SDN node monitor
-      copy:
+      ansible.builtin.copy:
         dest: /etc/systemd/system/{{ container_name }}.service
         owner: root
         group: root
@@ -69,6 +70,10 @@
             -e TEST_FLIP_INTERVAL={{ test_flip_interval }} \
             -e BUFFER_WINDOW={{ buffer_window }} \
             -e XDG_CONFIG_HOME=/app/.config \
+            {% if node_mode == 'non-sdn' %}
+            -v /:/host:rw,rslave \
+            -e HOST_ROOT=/host \
+            {% endif %}
             {% if node_mode == 'sdn' %}
             -v {{ podman_socket_dir }}:{{ podman_socket_dir }}:rw{% if selinux_enforcing %},Z{% endif %} \
             {% endif %}
@@ -81,7 +86,7 @@
           WantedBy=multi-user.target
 
     - name: Reload systemd and start SDN node monitor
-      systemd:
+      ansible.builtin.systemd:
         name: "{{ container_name }}.service"
         enabled: true
         state: started

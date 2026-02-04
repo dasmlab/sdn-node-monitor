@@ -24,7 +24,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/semconv/v1.24.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -51,10 +51,10 @@ var (
 	checkInterval       time.Duration = 30 * time.Second
 	restartInterval     time.Duration = 5 * time.Minute
 	nodeName            string
-	nodeMode            string        = "sdn"
-	bgpdService         string        = "bgpd"
-	gossipEnabled       bool          = false
-	gossipPort          string        = "9393"
+	nodeMode            string = "sdn"
+	bgpdService         string = "edpm_ovn_bgp_agent.service"
+	gossipEnabled       bool   = false
+	gossipPort          string = "9393"
 	gossipPeers         []string
 	gossipHelloInterval time.Duration = 2 * time.Minute
 	otelEnabled         bool          = false
@@ -278,9 +278,19 @@ func runHostCommand(ctx context.Context, args ...string) ([]byte, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("runHostCommand requires at least one argument")
 	}
+	hostRoot := os.Getenv("HOST_ROOT")
 	if _, err := exec.LookPath("nsenter"); err == nil {
-		nsenterArgs := append([]string{"--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--"}, args...)
+		var nsenterArgs []string
+		if hostRoot != "" {
+			nsenterArgs = append([]string{"--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--", "chroot", hostRoot}, args...)
+		} else {
+			nsenterArgs = append([]string{"--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--"}, args...)
+		}
 		cmd := exec.CommandContext(ctx, "nsenter", nsenterArgs...)
+		return cmd.CombinedOutput()
+	}
+	if hostRoot != "" {
+		cmd := exec.CommandContext(ctx, "chroot", append([]string{hostRoot}, args...)...)
 		return cmd.CombinedOutput()
 	}
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)

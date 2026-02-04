@@ -85,7 +85,8 @@ A lightweight Golang container that:
 - `CHECK_INTERVAL`: How often to check BGP status (default: 30s)
 - `METRICS_PORT`: Port for metrics endpoint (default: 8080)
 - `RESTART_INTERVAL`: Non-SDN periodic restart interval (default: 5m)
-- `BGPD_SERVICE`: Non-SDN systemd service name (default: bgpd)
+- `BGPD_SERVICE`: Non-SDN systemd service name (default: edpm_ovn_bgp_agent.service)
+- `HOST_ROOT`: Host root mount for systemctl in non-SDN mode (set to `/host` by run script)
 - `GOSSIP_ENABLED`: Enable gossip server and chatter (default: false)
 - `GOSSIP_PORT`: Gossip listener port (default: 9393)
 - `GOSSIP_PEERS`: Comma-separated peer list (`host:port` or URL)
@@ -249,7 +250,7 @@ cd container
 ./runme-local.sh
 
 # Non-SDN mode example
-NODE_MODE=non-sdn BGPD_SERVICE=bgpd RESTART_INTERVAL=5m ./runme-local.sh
+NODE_MODE=non-sdn BGPD_SERVICE=edpm_ovn_bgp_agent.service RESTART_INTERVAL=5m ./runme-local.sh
 
 # Gossip + OTEL example
 GOSSIP_ENABLED=true GOSSIP_PEERS="10.0.0.10:9393,10.0.0.11:9393" \
