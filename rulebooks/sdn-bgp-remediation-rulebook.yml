@@ -12,17 +12,23 @@
 
   rules:
     - name: Process SDN BGP Daemon Down Alert
-      # EDA 2.5 requires a single expression (no list) for condition
-      # This handles both alertname variants seen in logs
-      condition: (event.alertname == "SDNBGPDaemonDown" or event.alertname == "SDNFRRBGPDaemonDown") and event.labels.component == "bgp"
+      # AAP 2.5: event is wrapped under event.payload (Alertmanager default payload)
+      # Single string expression required
+      condition: >
+        (event.payload.commonLabels.alertname == "SDNBGPDaemonDown"
+        or event.payload.commonLabels.alertname == "SDNFRRBGPDaemonDown"
+        or event.payload.alerts[0].labels.alertname == "SDNBGPDaemonDown"
+        or event.payload.alerts[0].labels.alertname == "SDNFRRBGPDaemonDown")
+        and (event.payload.commonLabels.component == "bgp"
+        or event.payload.alerts[0].labels.component == "bgp")
       action:
         run_job_template:
-          name: "SDN BGP Daemon Remediation"
-          organization: "Default"
-          inventory: "SDN Nodes Inventory"
+          name: "SDN-MONITOR-REMEDIATE-TEMPLATE"
+          organization: "mcn-infra"
+          inventory: "sdn-monitor-remediate-inventory"
           extra_vars:
-            node_name: "{{ event.labels.node | default(event.commonLabels.node | default(event.alerts[0].labels.node | default(event.alerts[0].annotations.eda_node))) }}"
-            alert_name: "{{ event.alertname | default(event.commonLabels.alertname | default(event.alerts[0].labels.alertname)) }}"
-            severity: "{{ event.labels.severity | default(event.commonLabels.severity | default(event.alerts[0].labels.severity)) }}"
-            eda_action: "{{ event.annotations.eda_action | default(event.alerts[0].annotations.eda_action | default('remediate_bgp')) }}"
-            eda_playbook: "{{ event.annotations.eda_playbook | default(event.alerts[0].annotations.eda_playbook | default('restart-frr-bgp-agent.yml')) }}"
+            node_name: "{{ event.payload.commonLabels.node | default(event.payload.alerts[0].labels.node | default(event.payload.alerts[0].annotations.eda_node)) }}"
+            alert_name: "{{ event.payload.commonLabels.alertname | default(event.payload.alerts[0].labels.alertname) }}"
+            severity: "{{ event.payload.commonLabels.severity | default(event.payload.alerts[0].labels.severity) }}"
+            eda_action: "{{ event.payload.alerts[0].annotations.eda_action | default('remediate_bgp') }}"
+            eda_playbook: "{{ event.payload.alerts[0].annotations.eda_playbook | default('restart-frr-bgp-agent.yml') }}"

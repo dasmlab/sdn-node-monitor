@@ -15,13 +15,17 @@
       # AAP 2.5: event is wrapped under event.payload (Alertmanager default payload)
       # Single string expression required
       condition: >
-        (event.payload.commonLabels.alertname == "SDNBGPDaemonDown" or event.payload.commonLabels.alertname == "SDNFRRBGPDaemonDown")
-        and (event.payload.commonLabels.component == "bgp" or event.payload.alerts[0].labels.component == "bgp")
+        (event.payload.commonLabels.alertname == "SDNBGPDaemonDown"
+        or event.payload.commonLabels.alertname == "SDNFRRBGPDaemonDown"
+        or event.payload.alerts[0].labels.alertname == "SDNBGPDaemonDown"
+        or event.payload.alerts[0].labels.alertname == "SDNFRRBGPDaemonDown")
+        and (event.payload.commonLabels.component == "bgp"
+        or event.payload.alerts[0].labels.component == "bgp")
       action:
         run_job_template:
-          name: "SDN BGP Daemon Remediation"
-          organization: "Default"
-          inventory: "SDN Nodes Inventory"
+          name: "SDN-MONITOR-REMEDIATE-TEMPLATE"
+          organization: "mcn-infra"
+          inventory: "sdn-monitor-remediate-inventory"
           extra_vars:
             node_name: "{{ event.payload.commonLabels.node | default(event.payload.alerts[0].labels.node | default(event.payload.alerts[0].annotations.eda_node)) }}"
             alert_name: "{{ event.payload.commonLabels.alertname | default(event.payload.alerts[0].labels.alertname) }}"
