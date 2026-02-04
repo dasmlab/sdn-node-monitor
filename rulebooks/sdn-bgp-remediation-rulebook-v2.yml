@@ -14,15 +14,15 @@
     - name: Process SDN BGP Daemon Down Alert
       # AAP 2.5: event is wrapped under event.payload (Alertmanager default payload)
       # Single string expression required
-      condition: '(event.payload.commonLabels.alertname == "SDNBGPDaemonDown" or event.payload.commonLabels.alertname == "SDNFRRBGPDaemonDown" or event.payload.alerts[0].labels.alertname == "SDNBGPDaemonDown" or event.payload.alerts[0].labels.alertname == "SDNFRRBGPDaemonDown") and (event.payload.commonLabels.component == "bgp" or event.payload.alerts[0].labels.component == "bgp")'
+      condition: '(event.payload.commonLabels.alertname == "SDNBGPDaemonDown" or event.payload.commonLabels.alertname == "SDNFRRBGPDaemonDown") and event.payload.commonLabels.component == "bgp"'
       action:
         run_job_template:
           name: "SDN-MONITOR-REMEDIATE-TEMPLATE"
           organization: "mcn-infra"
           inventory: "sdn-monitor-remediate-inventory"
           extra_vars:
-            node_name: "{{ event.payload.commonLabels.node | default(event.payload.alerts[0].labels.node | default(event.payload.alerts[0].annotations.eda_node)) }}"
-            alert_name: "{{ event.payload.commonLabels.alertname | default(event.payload.alerts[0].labels.alertname) }}"
-            severity: "{{ event.payload.commonLabels.severity | default(event.payload.alerts[0].labels.severity) }}"
-            eda_action: "{{ event.payload.alerts[0].annotations.eda_action | default('remediate_bgp') }}"
-            eda_playbook: "{{ event.payload.alerts[0].annotations.eda_playbook | default('restart-frr-bgp-agent.yml') }}"
+            node_name: "{{ event.payload.commonLabels.node | default(event.payload.commonAnnotations.eda_node) }}"
+            alert_name: "{{ event.payload.commonLabels.alertname }}"
+            severity: "{{ event.payload.commonLabels.severity | default('critical') }}"
+            eda_action: "{{ event.payload.commonAnnotations.eda_action | default('remediate_bgp') }}"
+            eda_playbook: "{{ event.payload.commonAnnotations.eda_playbook | default('restart-frr-bgp-agent.yml') }}"
