@@ -1,4 +1,4 @@
-FROM golang:1.21-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /build
 
@@ -24,11 +24,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
 # Final stage
 FROM alpine:latest
 
-# Install runtime dependencies including podman client
+# Install runtime dependencies including podman client and nsenter (util-linux)
 # Note: We need podman client in the container to execute 'podman exec frr' commands
 # The podman socket will be mounted from the host at runtime
 # Works on both Ubuntu and RHEL host systems
-RUN apk --no-cache add ca-certificates tini podman
+RUN apk --no-cache add ca-certificates tini podman util-linux
 
 WORKDIR /app
 
