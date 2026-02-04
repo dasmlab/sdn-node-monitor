@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -279,21 +280,34 @@ func runHostCommand(ctx context.Context, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("runHostCommand requires at least one argument")
 	}
 	hostRoot := os.Getenv("HOST_ROOT")
-	if _, err := exec.LookPath("nsenter"); err == nil {
-		var nsenterArgs []string
-		if hostRoot != "" {
-			nsenterArgs = append([]string{"--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--", "chroot", hostRoot}, args...)
-		} else {
-			nsenterArgs = append([]string{"--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--"}, args...)
+	if hostRoot == "" {
+		if _, err := os.Stat("/host"); err == nil {
+			hostRoot = "/host"
 		}
+	}
+	command := args[0]
+	if command == "systemctl" {
+		command = "/usr/bin/systemctl"
+	}
+	if _, err := exec.LookPath("nsenter"); err == nil {
+		nsenterArgs := []string{"--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid"}
+		if hostRoot != "" {
+			nsenterArgs = append(nsenterArgs, "--root", hostRoot)
+		}
+		nsenterArgs = append(nsenterArgs, "--", command)
+		nsenterArgs = append(nsenterArgs, args[1:]...)
 		cmd := exec.CommandContext(ctx, "nsenter", nsenterArgs...)
 		return cmd.CombinedOutput()
 	}
 	if hostRoot != "" {
-		cmd := exec.CommandContext(ctx, "chroot", append([]string{hostRoot}, args...)...)
+		hostCommand := command
+		if hostRoot != "" {
+			hostCommand = filepath.Join(hostRoot, strings.TrimPrefix(command, "/"))
+		}
+		cmd := exec.CommandContext(ctx, "chroot", append([]string{hostRoot, hostCommand}, args[1:]...)...)
 		return cmd.CombinedOutput()
 	}
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd := exec.CommandContext(ctx, command, args[1:]...)
 	return cmd.CombinedOutput()
 }
 
