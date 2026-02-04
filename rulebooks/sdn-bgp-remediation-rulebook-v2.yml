@@ -14,13 +14,7 @@
     - name: Process SDN BGP Daemon Down Alert
       # AAP 2.5: event is wrapped under event.payload (Alertmanager default payload)
       # Single string expression required
-      condition: >
-        (event.payload.commonLabels.alertname == "SDNBGPDaemonDown"
-        or event.payload.commonLabels.alertname == "SDNFRRBGPDaemonDown"
-        or event.payload.alerts[0].labels.alertname == "SDNBGPDaemonDown"
-        or event.payload.alerts[0].labels.alertname == "SDNFRRBGPDaemonDown")
-        and (event.payload.commonLabels.component == "bgp"
-        or event.payload.alerts[0].labels.component == "bgp")
+      condition: '(event.payload.commonLabels.alertname == "SDNBGPDaemonDown" or event.payload.commonLabels.alertname == "SDNFRRBGPDaemonDown" or event.payload.alerts[0].labels.alertname == "SDNBGPDaemonDown" or event.payload.alerts[0].labels.alertname == "SDNFRRBGPDaemonDown") and (event.payload.commonLabels.component == "bgp" or event.payload.alerts[0].labels.component == "bgp")'
       action:
         run_job_template:
           name: "SDN-MONITOR-REMEDIATE-TEMPLATE"
