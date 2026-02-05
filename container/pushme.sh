@@ -23,7 +23,7 @@ next=$((build + 1))
 echo "$next" > "$buildfile"
 
 # create version tag
-tag="0.2.${next}-alpha"
+tag="0.6.${next}-alpha"
 
 # construct full names
 src="${app}:${local_tag}"

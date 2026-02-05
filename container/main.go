@@ -289,6 +289,14 @@ func runHostCommand(ctx context.Context, args ...string) ([]byte, error) {
 	if command == "systemctl" {
 		command = "/usr/bin/systemctl"
 	}
+	debugEnabled := logrus.IsLevelEnabled(logrus.DebugLevel)
+	if debugEnabled {
+		logrus.WithFields(logrus.Fields{
+			"host_root": hostRoot,
+			"cmd":       command,
+			"args":      args[1:],
+		}).Debug("runHostCommand starting")
+	}
 	if _, err := exec.LookPath("nsenter"); err == nil {
 		if hostRoot != "" {
 			hostNsDir := filepath.Join(hostRoot, "proc", "1", "ns")
@@ -301,23 +309,49 @@ func runHostCommand(ctx context.Context, args ...string) ([]byte, error) {
 					"--net=" + filepath.Join(hostNsDir, "net"),
 					"--pid=" + filepath.Join(hostNsDir, "pid"),
 					"--cgroup=" + filepath.Join(hostNsDir, "cgroup"),
-					"--root", hostRoot,
+					"--root=" + hostRoot,
 				}
 				nsenterArgs = append(nsenterArgs, "--", command)
 				nsenterArgs = append(nsenterArgs, args[1:]...)
+				if debugEnabled {
+					logrus.WithField("nsenter_args", strings.Join(append([]string{"nsenter"}, nsenterArgs...), " ")).Debug("runHostCommand nsenter command")
+				}
 				cmd := exec.CommandContext(ctx, "nsenter", nsenterArgs...)
-				return cmd.CombinedOutput()
+				output, err := cmd.CombinedOutput()
+				if debugEnabled {
+					logrus.WithFields(logrus.Fields{
+						"mode":   "nsenter-nsfile",
+						"cmd":    command,
+						"args":   args[1:],
+						"output": string(output),
+						"error":  err,
+					}).Debug("runHostCommand completed")
+				}
+				return output, err
 			}
 		}
 
 		nsenterArgs := []string{"--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--cgroup"}
 		if hostRoot != "" {
-			nsenterArgs = append(nsenterArgs, "--root", hostRoot)
+			nsenterArgs = append(nsenterArgs, "--root="+hostRoot)
 		}
 		nsenterArgs = append(nsenterArgs, "--", command)
 		nsenterArgs = append(nsenterArgs, args[1:]...)
+		if debugEnabled {
+			logrus.WithField("nsenter_args", strings.Join(append([]string{"nsenter"}, nsenterArgs...), " ")).Debug("runHostCommand nsenter command")
+		}
 		cmd := exec.CommandContext(ctx, "nsenter", nsenterArgs...)
-		return cmd.CombinedOutput()
+		output, err := cmd.CombinedOutput()
+		if debugEnabled {
+			logrus.WithFields(logrus.Fields{
+				"mode":   "nsenter-target",
+				"cmd":    command,
+				"args":   args[1:],
+				"output": string(output),
+				"error":  err,
+			}).Debug("runHostCommand completed")
+		}
+		return output, err
 	}
 	if hostRoot != "" {
 		hostCommand := command
@@ -325,10 +359,30 @@ func runHostCommand(ctx context.Context, args ...string) ([]byte, error) {
 			hostCommand = filepath.Join(hostRoot, strings.TrimPrefix(command, "/"))
 		}
 		cmd := exec.CommandContext(ctx, "chroot", append([]string{hostRoot, hostCommand}, args[1:]...)...)
-		return cmd.CombinedOutput()
+		output, err := cmd.CombinedOutput()
+		if debugEnabled {
+			logrus.WithFields(logrus.Fields{
+				"mode":   "chroot",
+				"cmd":    hostCommand,
+				"args":   args[1:],
+				"output": string(output),
+				"error":  err,
+			}).Debug("runHostCommand completed")
+		}
+		return output, err
 	}
 	cmd := exec.CommandContext(ctx, command, args[1:]...)
-	return cmd.CombinedOutput()
+	output, err := cmd.CombinedOutput()
+	if debugEnabled {
+		logrus.WithFields(logrus.Fields{
+			"mode":   "direct",
+			"cmd":    command,
+			"args":   args[1:],
+			"output": string(output),
+			"error":  err,
+		}).Debug("runHostCommand completed")
+	}
+	return output, err
 }
 
 func initTracing(ctx context.Context) (func(context.Context) error, error) {
@@ -957,8 +1011,9 @@ func runMonitor(ctx context.Context) {
 
 // checkBGPDService returns true when bgpd is active
 func checkBGPDService(ctx context.Context) (bool, string) {
-	if _, err := runHostCommand(ctx, "systemctl", "is-active", "--quiet", bgpdService); err != nil {
-		return false, fmt.Sprintf("bgpd service '%s' is not active: %v", bgpdService, err)
+	output, err := runHostCommand(ctx, "systemctl", "is-active", "--quiet", bgpdService)
+	if err != nil {
+		return false, fmt.Sprintf("bgpd service '%s' is not active: %v output=%s", bgpdService, err, strings.TrimSpace(string(output)))
 	}
 	return true, ""
 }
@@ -977,15 +1032,18 @@ func restartBGPD(ctx context.Context, reason string) bool {
 		"reason": reason,
 	}).Warn("Restarting bgpd service")
 
-	_, stopErr := runHostCommand(ctx, "systemctl", "stop", bgpdService)
+	stopOut, stopErr := runHostCommand(ctx, "systemctl", "stop", bgpdService)
 	if stopErr != nil {
-		logrus.WithError(stopErr).Warn("Failed to stop bgpd, will attempt restart")
+		logrus.WithError(stopErr).WithField("output", strings.TrimSpace(string(stopOut))).Warn("Failed to stop bgpd, will attempt restart")
 	}
 
-	_, startErr := runHostCommand(ctx, "systemctl", "start", bgpdService)
+	startOut, startErr := runHostCommand(ctx, "systemctl", "start", bgpdService)
 	if startErr != nil {
-		logrus.WithError(startErr).Warn("Failed to start bgpd, attempting systemctl restart")
-		_, _ = runHostCommand(ctx, "systemctl", "restart", bgpdService)
+		logrus.WithError(startErr).WithField("output", strings.TrimSpace(string(startOut))).Warn("Failed to start bgpd, attempting systemctl restart")
+		restartOut, restartErr := runHostCommand(ctx, "systemctl", "restart", bgpdService)
+		if restartErr != nil {
+			logrus.WithError(restartErr).WithField("output", strings.TrimSpace(string(restartOut))).Warn("systemctl restart failed")
+		}
 	}
 
 	success := false

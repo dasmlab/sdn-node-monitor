@@ -216,6 +216,7 @@ PODMAN_CMD="${PODMAN_CMD} \
 	-e BUFFER_WINDOW=\"${BUFFER_WINDOW:-30s}\" \
 	-e CONTAINER_HOST=unix://${PODMAN_SOCKET} \
 	-e XDG_CONFIG_HOME=/app/.config \
+	-e TINI_SUBREAPER=1 \
 	-p ${HOST_METRICS_PORT}:${CONTAINER_METRICS_PORT} \
 	--network host \
 	--restart always \
