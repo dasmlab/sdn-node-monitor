@@ -1,0 +1,70 @@
+---
+- name: Deploy and validate sdn-node-monitor via local scripts
+  hosts: all
+  become: true
+
+  vars:
+    remote_dir: "/home/cloud-admin/sdn-mon"
+    container_name: "sdn-node-monitor-local-instance"
+    bgpd_service: "edpm_ovn_bgp_agent.service"
+    restart_wait_timeout_seconds: 359
+    restart_poll_interval_seconds: 5
+    local_tar: "sdn-node-monitor-local-NEW.tar"
+    local_runme: "runme-local.sh"
+    local_startme: "startme.sh"
+
+  tasks:
+    - name: Ensure remote directory exists
+      ansible.builtin.file:
+        path: "{{ remote_dir }}"
+        state: directory
+        owner: cloud-admin
+        group: cloud-admin
+        mode: "0755"
+
+    - name: Copy container tarball and scripts
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ remote_dir }}/{{ item.dest }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: "{{ local_tar }}", dest: "{{ local_tar }}", mode: "0644" }
+        - { src: "{{ local_runme }}", dest: "{{ local_runme }}", mode: "0755" }
+        - { src: "{{ local_startme }}", dest: "{{ local_startme }}", mode: "0755" }
+
+    - name: Run startme script as root
+      ansible.builtin.command: "./{{ local_startme }}"
+      args:
+        chdir: "{{ remote_dir }}"
+
+    - name: Ensure container is running
+      ansible.builtin.command: "podman ps --filter name={{ container_name }} --format {{ '{{.Names}}' }}"
+      register: podman_ps
+      changed_when: false
+      failed_when: podman_ps.stdout.strip() != container_name
+
+    - name: Capture current bgpd active timestamp (human)
+      ansible.builtin.command: "systemctl show -p ActiveEnterTimestamp --value {{ bgpd_service }}"
+      register: bgpd_active_timestamp
+      changed_when: false
+
+    - name: Capture current bgpd active timestamp (monotonic)
+      ansible.builtin.command: "systemctl show -p ActiveEnterTimestampMonotonic --value {{ bgpd_service }}"
+      register: bgpd_active_mono
+      changed_when: false
+
+    - name: Show current bgpd active timestamp
+      ansible.builtin.debug:
+        msg: "bgpd active since: {{ bgpd_active_timestamp.stdout.strip() }}"
+
+    - name: Wait for bgpd restart (active timestamp change)
+      ansible.builtin.command: "systemctl show -p ActiveEnterTimestampMonotonic --value {{ bgpd_service }}"
+      register: bgpd_active_mono_new
+      changed_when: false
+      until: bgpd_active_mono_new.stdout.strip() != bgpd_active_mono.stdout.strip()
+      retries: "{{ (restart_wait_timeout_seconds / restart_poll_interval_seconds) | int + 1 }}"
+      delay: "{{ restart_poll_interval_seconds }}"
+
+    - name: Confirm bgpd restarted
+      ansible.builtin.debug:
+        msg: "bgpd restart detected (monotonic changed from {{ bgpd_active_mono.stdout.strip() }} to {{ bgpd_active_mono_new.stdout.strip() }})"
