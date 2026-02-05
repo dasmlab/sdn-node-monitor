@@ -290,6 +290,26 @@ func runHostCommand(ctx context.Context, args ...string) ([]byte, error) {
 		command = "/usr/bin/systemctl"
 	}
 	if _, err := exec.LookPath("nsenter"); err == nil {
+		if hostRoot != "" {
+			hostNsDir := filepath.Join(hostRoot, "proc", "1", "ns")
+			mountNs := filepath.Join(hostNsDir, "mnt")
+			if _, err := os.Stat(mountNs); err == nil {
+				nsenterArgs := []string{
+					"--mount=" + mountNs,
+					"--uts=" + filepath.Join(hostNsDir, "uts"),
+					"--ipc=" + filepath.Join(hostNsDir, "ipc"),
+					"--net=" + filepath.Join(hostNsDir, "net"),
+					"--pid=" + filepath.Join(hostNsDir, "pid"),
+					"--cgroup=" + filepath.Join(hostNsDir, "cgroup"),
+					"--root", hostRoot,
+				}
+				nsenterArgs = append(nsenterArgs, "--", command)
+				nsenterArgs = append(nsenterArgs, args[1:]...)
+				cmd := exec.CommandContext(ctx, "nsenter", nsenterArgs...)
+				return cmd.CombinedOutput()
+			}
+		}
+
 		nsenterArgs := []string{"--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--cgroup"}
 		if hostRoot != "" {
 			nsenterArgs = append(nsenterArgs, "--root", hostRoot)
