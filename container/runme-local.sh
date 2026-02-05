@@ -173,9 +173,11 @@ fi
 # For non-SDN mode, mount host root so systemctl can run via chroot/nsenter
 if [ "${NODE_MODE:-sdn}" = "non-sdn" ]; then
     PODMAN_CMD="${PODMAN_CMD} \
+	--pid=host \
 	-v /:/host:rw,rslave \
 	-e HOST_ROOT=/host"
     echo "  ℹ️  Mounting host root at /host for systemctl (non-SDN mode)"
+    echo "  ℹ️  Using host PID namespace for systemd access (non-SDN mode)"
 fi
 
 # Add SELinux bypass and privileged mode for podman-in-podman BEFORE image name

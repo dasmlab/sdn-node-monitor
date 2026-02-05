@@ -290,7 +290,7 @@ func runHostCommand(ctx context.Context, args ...string) ([]byte, error) {
 		command = "/usr/bin/systemctl"
 	}
 	if _, err := exec.LookPath("nsenter"); err == nil {
-		nsenterArgs := []string{"--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid"}
+		nsenterArgs := []string{"--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--cgroup"}
 		if hostRoot != "" {
 			nsenterArgs = append(nsenterArgs, "--root", hostRoot)
 		}
