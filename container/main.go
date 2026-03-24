@@ -43,7 +43,7 @@ var (
 	bgpRestartTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "sdn_simple_bgpd_restart_total",
-			Help: "Total number of bgpd restarts performed by sdn-node-monitor (non-SDN mode)",
+			Help: "Total number of OVN BGP agent (bgpd) restarts (non-SDN periodic/inactive/test; SDN periodic when enabled)",
 		},
 		[]string{"node", "reason"},
 	)
@@ -65,8 +65,9 @@ var (
 	gitCommit           string        = "unknown"
 	testMode            string        = "off"
 	testFlipInterval    int           = 4
-	bufferWindow        time.Duration = 30 * time.Second
-	maxBufferSize       int           = 10
+	bufferWindow               time.Duration = 30 * time.Second
+	maxBufferSize              int           = 10
+	bgpdPeriodicRestartEnabled bool          = true // SDN: periodic systemctl restart of BGPD_SERVICE; overridden from env in init()
 
 	// State buffer for capturing logs before condition fires
 	stateBuffer struct {
@@ -195,9 +196,18 @@ func init() {
 		}
 	}
 
-	// Get bgpd service name from environment (non-SDN mode)
+	// Get bgpd / OVN BGP agent systemd unit name (non-SDN checks/restarts; SDN periodic restart)
 	if envService := os.Getenv("BGPD_SERVICE"); envService != "" {
 		bgpdService = envService
+	}
+
+	// SDN mode: periodic restart of OVN BGP agent on the host (default true)
+	if envPeriodic := os.Getenv("BGPD_PERIODIC_RESTART_ENABLED"); envPeriodic != "" {
+		if parsed, ok := parseBool(envPeriodic); ok {
+			bgpdPeriodicRestartEnabled = parsed
+		} else {
+			logrus.WithField("bgpd_periodic_restart_enabled", envPeriodic).Warn("Invalid BGPD_PERIODIC_RESTART_ENABLED, must be true/false")
+		}
 	}
 
 	// Set logrus level
@@ -221,7 +231,7 @@ func init() {
 		}
 	}
 
-	// Get restart interval from environment (non-SDN mode)
+	// Get restart interval (non-SDN periodic restart; SDN periodic OVN BGP agent restart when enabled)
 	if envRestart := os.Getenv("RESTART_INTERVAL"); envRestart != "" {
 		if parsed, err := time.ParseDuration(envRestart); err == nil {
 			restartInterval = parsed
@@ -1009,6 +1019,32 @@ func runMonitor(ctx context.Context) {
 	}
 }
 
+// runSDNPeriodicBGPRestart restarts the host OVN BGP agent on RESTART_INTERVAL while in SDN mode
+// (FRR checks remain in runMonitor). Requires host mount + pid namespace so runHostCommand reaches systemd.
+func runSDNPeriodicBGPRestart(ctx context.Context) {
+	restartTicker := time.NewTicker(restartInterval)
+	defer restartTicker.Stop()
+
+	logrus.WithFields(logrus.Fields{
+		"node":             nodeName,
+		"restart_interval": restartInterval,
+		"bgpd_service":     bgpdService,
+		"node_mode":        nodeMode,
+	}).Info("Starting OVN BGP agent periodic restart (SDN mode)")
+
+	for {
+		select {
+		case <-ctx.Done():
+			logrus.Info("SDN periodic BGP agent restart loop stopped")
+			return
+		case <-restartTicker.C:
+			if ok := restartBGPD(ctx, "interval"); !ok {
+				logrus.WithField("service", bgpdService).Error("OVN BGP agent restart failed on interval (SDN mode)")
+			}
+		}
+	}
+}
+
 // checkBGPDService returns true when bgpd is active
 func checkBGPDService(ctx context.Context) (bool, string) {
 	output, err := runHostCommand(ctx, "systemctl", "is-active", "--quiet", bgpdService)
@@ -1157,6 +1193,13 @@ func main() {
 		configFields["restart_interval"] = restartInterval
 		configFields["bgpd_service"] = bgpdService
 	}
+	if nodeMode == "sdn" {
+		configFields["bgpd_periodic_restart_enabled"] = bgpdPeriodicRestartEnabled
+		if bgpdPeriodicRestartEnabled {
+			configFields["restart_interval"] = restartInterval
+			configFields["bgpd_service"] = bgpdService
+		}
+	}
 	if testMode != "off" {
 		configFields["test_mode"] = testMode
 		if testMode == "flip" {
@@ -1229,6 +1272,13 @@ func main() {
 		go runNonSDNMonitor(ctx)
 	} else {
 		go runMonitor(ctx)
+		if bgpdPeriodicRestartEnabled {
+			if restartInterval > 0 {
+				go runSDNPeriodicBGPRestart(ctx)
+			} else {
+				logrus.Warn("BGPD_PERIODIC_RESTART_ENABLED is true but RESTART_INTERVAL is zero; periodic host restart disabled")
+			}
+		}
 	}
 
 	// Wait for interrupt signal for graceful shutdown

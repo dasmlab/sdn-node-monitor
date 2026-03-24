@@ -7,6 +7,8 @@
     remote_dir: "/home/cloud-admin/sdn-mon"
     container_name: "sdn-node-monitor-local-instance"
     bgpd_service: "edpm_ovn_bgp_agent.service"
+    restart_timer_unit: "/etc/systemd/system/ovn-bgp-agent-restart.timer"
+    restart_service_unit: "/etc/systemd/system/ovn-bgp-agent-restart.service"
     restart_wait_timeout_seconds: 359
     restart_poll_interval_seconds: 5
     local_tar: "sdn-node-monitor-local-NEW.tar"
@@ -31,6 +33,22 @@
         - { src: "{{ local_tar }}", dest: "{{ local_tar }}", mode: "0644" }
         - { src: "{{ local_runme }}", dest: "{{ local_runme }}", mode: "0755" }
         - { src: "{{ local_startme }}", dest: "{{ local_startme }}", mode: "0755" }
+
+    - name: Remove ovn-bgp-agent restart units if present
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ restart_timer_unit }}"
+        - "{{ restart_service_unit }}"
+
+    - name: Reload systemd units after cleanup
+      ansible.builtin.command: "systemctl daemon-reload"
+      changed_when: false
+
+    - name: Load podman image from tarball
+      ansible.builtin.command: "podman load -i {{ remote_dir }}/{{ local_tar }}"
+      changed_when: true
 
     - name: Run startme script as root
       ansible.builtin.command: "./{{ local_startme }}"

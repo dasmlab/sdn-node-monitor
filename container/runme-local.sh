@@ -170,14 +170,27 @@ else
     echo "  ℹ️  Mounting user socket: ${PODMAN_SOCKET}"
 fi
 
-# For non-SDN mode, mount host root so systemctl can run via chroot/nsenter
+# Mount host root for systemctl: non-SDN mode always; SDN mode when periodic OVN BGP agent restart is on (default)
+NEED_HOST_MOUNT=""
 if [ "${NODE_MODE:-sdn}" = "non-sdn" ]; then
+    NEED_HOST_MOUNT=1
+elif [ "${NODE_MODE:-sdn}" = "sdn" ]; then
+    case "${BGPD_PERIODIC_RESTART_ENABLED:-true}" in
+        false|0|no|off|FALSE|NO|OFF) ;;
+        *) NEED_HOST_MOUNT=1 ;;
+    esac
+fi
+if [ -n "${NEED_HOST_MOUNT}" ]; then
     PID_MODE="${PID_MODE:-ns:/proc/1/ns/pid}"
     PODMAN_CMD="${PODMAN_CMD} \
 	--pid=${PID_MODE} \
 	-v /:/host:rw,rslave \
 	-e HOST_ROOT=/host"
-    echo "  ℹ️  Mounting host root at /host for systemctl (non-SDN mode)"
+    if [ "${NODE_MODE:-sdn}" = "non-sdn" ]; then
+        echo "  ℹ️  Mounting host root at /host for systemctl (non-SDN mode)"
+    else
+        echo "  ℹ️  Mounting host root at /host for periodic OVN BGP agent restart (SDN mode)"
+    fi
     echo "  ℹ️  Using PID namespace mode: ${PID_MODE}"
 fi
 
@@ -203,6 +216,7 @@ PODMAN_CMD="${PODMAN_CMD} \
 	-e METRICS_PORT=\"${CONTAINER_METRICS_PORT}\" \
 	-e NODE_MODE=\"${NODE_MODE:-sdn}\" \
 	-e BGPD_SERVICE=\"${BGPD_SERVICE:-edpm_ovn_bgp_agent.service}\" \
+	-e BGPD_PERIODIC_RESTART_ENABLED=\"${BGPD_PERIODIC_RESTART_ENABLED:-true}\" \
 	-e RESTART_INTERVAL=\"${RESTART_INTERVAL:-5m}\" \
 	-e GOSSIP_ENABLED=\"${GOSSIP_ENABLED:-false}\" \
 	-e GOSSIP_PORT=\"${GOSSIP_PORT:-9393}\" \

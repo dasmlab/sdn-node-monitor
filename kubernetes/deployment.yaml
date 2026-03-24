@@ -31,6 +31,14 @@ spec:
           value: "30s"   # How often to check FRR daemons status
         - name: METRICS_PORT
           value: "8080"
+        - name: BGPD_SERVICE
+          value: "edpm_ovn_bgp_agent.service"
+        - name: RESTART_INTERVAL
+          value: "5m"
+        - name: BGPD_PERIODIC_RESTART_ENABLED
+          value: "true"
+        - name: HOST_ROOT
+          value: "/host"
         ports:
         - name: metrics
           containerPort: 8080
@@ -46,6 +54,9 @@ spec:
         - name: podman-socket
           mountPath: /run/podman/podman.sock
           readOnly: true
+        - name: host-root
+          mountPath: /host
+          mountPropagation: HostToContainer
         # Uncomment if podman binary needs to be mounted from host:
         # - name: podman-binary
         #   mountPath: /usr/bin/podman
@@ -62,6 +73,10 @@ spec:
         hostPath:
           path: /run/podman/podman.sock
           type: Socket
+      - name: host-root
+        hostPath:
+          path: /
+          type: Directory
       # Uncomment if podman binary needs to be mounted from host:
       # - name: podman-binary
       #   hostPath:

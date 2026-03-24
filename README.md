@@ -84,9 +84,10 @@ A lightweight Golang container that:
 - `LOG_LEVEL`: Logging level - debug, info, warn, error (default: info)
 - `CHECK_INTERVAL`: How often to check BGP status (default: 30s)
 - `METRICS_PORT`: Port for metrics endpoint (default: 8080)
-- `RESTART_INTERVAL`: Non-SDN periodic restart interval (default: 5m)
-- `BGPD_SERVICE`: Non-SDN systemd service name (default: edpm_ovn_bgp_agent.service)
-- `HOST_ROOT`: Host root mount for systemctl in non-SDN mode (set to `/host` by run script)
+- `RESTART_INTERVAL`: Periodic restart interval for `BGPD_SERVICE` on the host (default: 5m). Used in **non-SDN** mode for the systemd monitor loop, and in **SDN** mode when `BGPD_PERIODIC_RESTART_ENABLED` is true (default).
+- `BGPD_SERVICE`: Host systemd unit for the OVN BGP agent (default: `edpm_ovn_bgp_agent.service`). Non-SDN mode uses it for checks and restarts; SDN mode uses it only for periodic restarts when enabled.
+- `BGPD_PERIODIC_RESTART_ENABLED`: In **SDN** mode, periodically restart `BGPD_SERVICE` on the host every `RESTART_INTERVAL` (default: `true`). Set `false` to disable and keep only FRR podman checks.
+- `HOST_ROOT`: Host root mount for `systemctl` via nsenter/chroot (set to `/host` by run script when non-SDN mode or SDN periodic restart is enabled)
 - `GOSSIP_ENABLED`: Enable gossip server and chatter (default: false)
 - `GOSSIP_PORT`: Gossip listener port (default: 9393)
 - `GOSSIP_PEERS`: Comma-separated peer list (`host:port` or URL)
